@@ -5,7 +5,7 @@ local S = {
   cfg = {
     Autofarm=true, AutoRetry=true, AutoReload=true, AutoQTE=true, MenuDisabled=false,
     NapeSize=15, PullAllNapes=false, PullRadius=5000, PullCount=6,
-    PullEvery=2, PullPerFrame=1, AttackDelay=0.06,
+    PullEvery=2, PullPerFrame=1, PullExtraInterval=0.05, AttackDelay=0.06,
     HeightNormal=120, HeightStall=100, HeightAttack=160, HeightColossal=200,
     BobAmplitude=2, HoverOffsetX=0, HoverOffsetZ=0, NapeOffsetY=2, SafeHeight=9999,
     ShiftEnabled=false, ShiftKey=1, TitanSkills=true, TitanSkillDelay=0.8,
@@ -15,7 +15,8 @@ local S = {
   stats={kills=0, shifts=0, status="starting", target="none"},
   world={}, entries={}, list={}, target=nil, extras={}, extraAt=0, extraIndex=1,
   mode="loading", progress=os.clock(), lastKill=os.clock(), lastBeat=0,
-  lastBoot="", trace={}, traceAt=0, history={}, boxAt=0, lastBox="",
+  lastBoot="", trace={}, traceTimes={}, traceHead=0, traceAt=0,
+  history={}, boxAt=0, lastBox="",
   slash=0, lastHover=0, lastPark=0, lastSlash=0, lastSkill=0,
   lastShift=0, shiftSince=0, form=false, lastBar=nil, barDrop=0,
   qte={}, ui={}, retryCount=0, retrySince=nil, refillSince=nil,
@@ -45,8 +46,20 @@ local function boot(msg)
   end)
 end
 local function trace(step)
-  S.trace[#S.trace+1]=string.format("%.2f %s",os.clock(),step)
-  if #S.trace > 20 then table.remove(S.trace,1) end
+  local i=S.traceHead%32+1
+  S.traceHead=i
+  S.trace[i]=step
+  S.traceTimes[i]=os.clock()
+end
+local function traceText()
+  local lines={}
+  for n=1,32 do
+    local i=(S.traceHead+n-1)%32+1
+    if S.trace[i] then
+      lines[#lines+1]=string.format("%.2f %s",S.traceTimes[i],S.trace[i])
+    end
+  end
+  return table.concat(lines,"\n")
 end
 local function beat(state)
   pcall(writefile,"aotr/heartbeat.txt",state .. " " .. os.date("%H:%M:%S"))
@@ -89,7 +102,12 @@ local function char()
   if not model then S.world.char=nil; S.world.root=nil; S.world.hum=nil; return end
   if not same(model,S.world.char) then
     S.world.char=model
+    S.world.root=nil; S.world.hum=nil
+  end
+  if not S.world.root or not same(S.world.root.Parent,model) then
     S.world.root=model:FindFirstChild("HumanoidRootPart")
+  end
+  if not S.world.hum or not same(S.world.hum.Parent,model) then
     S.world.hum=model:FindFirstChildOfClass("Humanoid")
   end
 end
@@ -179,6 +197,7 @@ end
 local function hover()
   local root=S.world.root
   if not root or not root.Parent then return end
+  if S.refillSince then return end -- do not pull away from the gas tank during refill
   local now=os.clock()
   local t=S.target
   if t and live(t) and isrbxactive() then
@@ -323,14 +342,34 @@ local function supplies()
   local w=S.world
   if S.form or not w.char or not w.root or not w.hum then return false end
   local rig=w.char:FindFirstChild("Rig_"..w.player.Name)
-  local right=path(rig,"RightHand","Blade_1")
-  local left=path(rig,"LeftHand","Blade_1")
+  local rightHand=rig and rig:FindFirstChild("RightHand")
+  local leftHand=rig and rig:FindFirstChild("LeftHand")
+  if not (rightHand and leftHand) then return false end
+  local right=rightHand:FindFirstChild("Blade_1")
+  local left=leftHand:FindFirstChild("Blade_1")
   local off=S.offsets and S.offsets.BasePart and S.offsets.BasePart.Transparency
-  if not (right and left and off) then return false end
-  local ok,broken=pcall(function()
-    return memory_read("float",right.Address+off)>=0.9 and memory_read("float",left.Address+off)>=0.9
-  end)
-  if not ok or not broken then S.refillSince=nil; return false end
+  local broken=not right or not left
+  if not broken then
+    if not off then
+      S.target=nil; S.stats.status="blade check unavailable"
+      return true
+    end
+    local readOk,result=pcall(function()
+      return memory_read("float",right.Address+off)>=0.9
+        and memory_read("float",left.Address+off)>=0.9
+    end)
+    if not readOk then
+      S.target=nil; S.stats.status="blade read failed"
+      return true
+    end
+    broken=result
+  end
+  if not broken then S.refillSince=nil; return false end
+  if not isrbxactive() then
+    S.target=nil; S.stats.status="waiting for focus to reload"
+    S.refillSince=nil
+    return true
+  end
   S.target=nil; S.stats.status="reloading"; S.refillSince=S.refillSince or os.clock()
   local blade=tonumber((S.ui.blades and S.ui.blades.Text or ""):match("%d+")) or 0
   local gas=tonumber((S.ui.gas and S.ui.gas.Text or ""):match("%d+")) or 0
@@ -477,7 +516,7 @@ local function menu()
   slider(attack,"PullCount","Pull Count",1,12,nil," napes")
   slider(attack,"PullRadius","Pull Range",100,5000,nil," studs")
   slider(attack,"PullEvery","Extra Napes Every",1,8,nil," slashes")
-  slider(attack,"PullPerFrame","Extras Per Frame",1,3,nil," napes")
+  slider(attack,"PullExtraInterval","Extra Pull Spacing",30,200,1000," ms")
   slider(attack,"NapeSize","Nape Size",5,40,nil," studs")
   slider(attack,"AttackDelay","Slash Delay",30,300,1000," ms")
   local heights=tune:AddRightGroupbox("Hover")
@@ -499,11 +538,30 @@ local function menu()
   end
 end
 local function offsets()
-  local raw
-  local ok,res=pcall(httpget,"https://imtheo.lol/Offsets/Offsets.json")
-  if ok and type(res)=="string" then raw=res; pcall(writefile,"aotr/offsets.json",res) end
-  if not raw then pcall(function() raw=readfile("aotr/offsets.json") end) end
-  if raw then pcall(function() S.offsets=game:GetService("HttpService"):JSONDecode(raw).Offsets end) end
+  local http=game:GetService("HttpService")
+  local function decode(raw)
+    if type(raw)~="string" or #raw<100 then return nil end
+    local ok,data=pcall(function() return http:JSONDecode(raw) end)
+    if not ok or type(data)~="table" or type(data.Offsets)~="table" then return nil end
+    local o=data.Offsets
+    if not (o.GuiObject and type(o.GuiObject.Visible)=="number"
+      and o.BasePart and type(o.BasePart.Transparency)=="number") then return nil end
+    return o
+  end
+  local cached
+  pcall(function() cached=readfile("aotr/offsets.json") end)
+  S.offsets=decode(cached)
+  for _,url in ipairs({"https://offsets.imtheo.lol/Offsets.json",
+    "https://imtheo.lol/Offsets/Offsets.json"}) do
+    local ok,raw=pcall(httpget,url)
+    local parsed=ok and decode(raw)
+    if parsed then
+      S.offsets=parsed
+      pcall(writefile,"aotr/offsets.json",raw)
+      return
+    end
+  end
+  if S.offsets then boot("using cached offsets") else boot("offsets unavailable; blade check paused") end
 end
 
 pcall(function()
@@ -511,6 +569,20 @@ pcall(function()
   label.Size=16; label.Outline=true; label.Color=Color3.fromRGB(120,200,110)
   label.Position=Vector2.new(12,300); label.Visible=true
   S.statusLabel=label
+end)
+
+-- Preserve the previous run before the heartbeat thread can truncate trace.txt.
+pcall(function()
+  if isfile("aotr/trace.txt") then
+    local previous=readfile("aotr/trace.txt")
+    if type(previous)=="string" and #previous>0 then
+      local p="aotr/trace_freezes.txt"
+      local old=(isfile(p) and readfile(p)) or ""
+      if #old>60000 then old=string.sub(old,-30000) end
+      writefile(p,old .. "=== v2 start " .. os.date("%H:%M:%S")
+        .. " previous trace:\n" .. previous .. "\n\n")
+    end
+  end
 end)
 
 -- Start all persistent threads before this chunk's first yield.
@@ -537,7 +609,7 @@ task.spawn(function()
     end
     if now-S.traceAt>=1 then
       S.traceAt=now
-      pcall(writefile,"aotr/trace.txt",table.concat(S.trace,"\n"))
+      pcall(writefile,"aotr/trace.txt",traceText())
     end
     task.wait(1)
   end
@@ -561,27 +633,16 @@ task.spawn(function()
       if not ok then boot("hover: "..tostring(err)) end
     end
     if now>=nextExtra and S.extraPending and S.target and S.cfg.PullAllNapes then
-      nextExtra=now+0.016
-      for _=1,math.min(3,math.max(1,S.cfg.PullPerFrame)) do
-        local e=S.extras[S.extraIndex]
-        if not e then S.extraPending=false; break end
-        S.extraIndex+=1
-        pcall(pull,e)
-      end
+      nextExtra=now+math.max(0.03,S.cfg.PullExtraInterval)
+      local e=S.extras[S.extraIndex]
+      if not e then S.extraPending=false
+      else S.extraIndex+=1; pcall(pull,e) end
     end
     task.wait(0.016)
   end
 end)
 
 boot("start")
-pcall(function()
-  if isfile("aotr/trace.txt") then
-    local p="aotr/trace_freezes.txt"
-    local old=(isfile(p) and readfile(p)) or ""
-    if #old>60000 then old=string.sub(old,-30000) end
-    writefile(p,old .. "=== v2 start " .. os.date("%H:%M:%S") .. " previous trace:\n" .. readfile("aotr/trace.txt") .. "\n\n")
-  end
-end)
 loadSettings()
 offsets()
 local idWait=os.clock()
@@ -609,6 +670,8 @@ while not stopped() do
       -- A stale farming beat lets the watchdog restart an unresponsive retry loop.
       S.heartbeatPaused=true
     end
+  elseif not S.world.root or not same(S.world.root.Parent,S.world.char) then
+    S.target=nil; S.stats.status="waiting for character root"; task.wait(0.25)
   elseif not S.world.hum or S.world.hum.Health<=0 then
     if S.stats.status~="dead" then dump("death") end
     S.target=nil; S.stats.status="dead"; task.wait(0.5)
@@ -617,6 +680,7 @@ while not stopped() do
       if S.refillSince and now-S.refillSince>20 then giveUp() end
       task.wait(0.1)
     else
+      S.refillSince=nil
       form()
       local t=S.target
       if t and not live(t) then
@@ -625,6 +689,9 @@ while not stopped() do
       end
       if not S.target then S.target=choose() end
       t=S.target
+      if not S.cfg.PullAllNapes or (t and S.extraFor~=t.model.Address) then
+        S.extraPending=false
+      end
       if t and live(t) then
         S.stats.target=string.sub(t.name,1,12)
         if now-S.lastKill>(t.boss and S.cfg.BossNoKillMinutes or S.cfg.NoKillMinutes)*60 then
@@ -638,12 +705,14 @@ while not stopped() do
         else
           S.stats.status=S.form and "titan attacking" or "attacking"
           if not S.form then
-            if S.cfg.PullAllNapes and (now-S.extraAt>0.5 or S.extraFor~=t.model.Address) then
+            if S.cfg.PullAllNapes and not S.extraPending
+              and (now-S.extraAt>0.5 or S.extraFor~=t.model.Address) then
               extras(t); S.extraFor=t.model.Address
             end
             pcall(pull,t)
             S.slash+=1
-            if S.cfg.PullAllNapes and S.slash%math.max(1,S.cfg.PullEvery)==0 then
+            if S.cfg.PullAllNapes and not S.extraPending
+              and S.slash%math.max(1,S.cfg.PullEvery)==0 then
               S.extraIndex=1; S.extraPending=true
             end
           end

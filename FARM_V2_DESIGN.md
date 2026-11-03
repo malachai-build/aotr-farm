@@ -12,7 +12,17 @@
 
 ## Validation
 
-The staged `aotr/autofarm_v2.lua` passed Matcha's wrapped `loadstring` compile check. This check parses the file without starting the farm. Live farming behavior has not been tested because the deployed script is still in use.
+The staged `aotr/autofarm_v2.lua` passed Matcha's wrapped `loadstring` compile check. The reload fix was started in a live mission. A later snapshot showed blade memory `0/0` with the HUD at `1 / 3` sets, consistent with successful reloads. The paced-pull revision kept a fresh heartbeat for over a minute and reached 11 recorded kills without a watchdog restart. Longer running stability remains unverified.
+
+## Reload fix (2026-11-03)
+
+The first v2 run attacked with broken blades because its offset loader replaced a valid cache with an empty HTTP response. The live blade snapshot showed transparency values `1/1` at the memory offset while Matcha's direct `Transparency` property returned `-0.5/-0.5`, so the memory read remains authoritative. The loader now validates JSON before replacing the cache, and the farm pauses attacks if the offset is unavailable. The actor also stays off the character during gas-tank refill so its no-target park cannot pull the character away. The cache was restored from the current offsets endpoint.
+
+After a teleport, a second live trace showed clicks with no hover writes and a root at ground level. The collector now refreshes root and humanoid references when their parent is no longer the current character model, and the main loop waits for a valid root before attacking. It also clears the refill flag whenever the reload check does not run, allowing hover to resume.
+
+The watchdog then recorded repeated stale-heartbeat restarts under v2. The saved settings allowed three extra napes to be moved in a single actor tick. Extra pulls are now limited to one per tick, spaced by `PullExtraInterval` (50 ms by default), and a new batch waits for the previous batch to finish. Hot-path trace events use a fixed ring; string formatting happens once per second when the trace file is flushed. This reduces bursts but does not yet establish the root cause of every Matcha stop.
+
+The v2 startup was also overwriting `trace.txt` before it archived the prior run, leaving empty freeze sections. The archive now runs before background threads start, so subsequent restarts preserve the last trace for diagnosis.
 
 ## Switch and rollback
 
