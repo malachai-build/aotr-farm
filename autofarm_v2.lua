@@ -5,7 +5,8 @@ local S = {
   cfg = {
     Autofarm=true, AutoRetry=true, AutoReload=true, AutoQTE=true, MenuDisabled=false,
     NapeSize=15, PullAllNapes=false, PullRadius=5000, PullCount=6,
-    PullEvery=2, PullPerFrame=1, PullExtraInterval=0.05, AttackDelay=0.06,
+    PullEvery=2, PullPerFrame=1, PullExtraInterval=0.05,
+    AttackDelay=0.06, MinSlashInterval=0.25,
     HeightNormal=120, HeightStall=100, HeightAttack=160, HeightColossal=200,
     BobAmplitude=2, HoverOffsetX=0, HoverOffsetZ=0, NapeOffsetY=2, SafeHeight=9999,
     ShiftEnabled=false, ShiftKey=1, TitanSkills=true, TitanSkillDelay=0.8,
@@ -169,9 +170,11 @@ local function extras(target)
     end
   end
   table.sort(list,function(a,b) return a.d<b.d end)
+  if S.extraFor~=target.model.Address then S.extraIndex=1 end
   S.extras={}
   for i=1,math.min(#list,math.max(0,S.cfg.PullCount-1)) do S.extras[i]=list[i].e end
-  S.extraIndex=1; S.extraAt=os.clock()
+  if #S.extras>0 then S.extraIndex=(S.extraIndex-1)%#S.extras+1 end
+  S.extraAt=os.clock()
 end
 local function pull(e)
   local root=S.world.root
@@ -276,6 +279,15 @@ end
 local function tap(vk)
   keypress(vk); task.wait(0.05); keyrelease(vk)
 end
+local function holdReload()
+  trace("reload R down")
+  boot("reload R down")
+  keypress(0x52)
+  task.wait(0.5)
+  keyrelease(0x52)
+  trace("reload R up")
+  boot("reload R up")
+end
 local function form()
   local w=S.world
   local player=w.player
@@ -364,27 +376,47 @@ local function supplies()
     end
     broken=result
   end
-  if not broken then S.refillSince=nil; return false end
+  local blade=tonumber((S.ui.blades and S.ui.blades.Text or ""):match("%d+"))
+  local gas=tonumber((S.ui.gas and S.ui.gas.Text or ""):match("%d+"))
+  local needsStation=blade and gas and (blade==0 or gas==0)
+  if not broken and not needsStation then S.refillSince=nil; return false end
   if not isrbxactive() then
     S.target=nil; S.stats.status="waiting for focus to reload"
     S.refillSince=nil
     return true
   end
   S.target=nil; S.stats.status="reloading"; S.refillSince=S.refillSince or os.clock()
-  local blade=tonumber((S.ui.blades and S.ui.blades.Text or ""):match("%d+")) or 0
-  local gas=tonumber((S.ui.gas and S.ui.gas.Text or ""):match("%d+")) or 0
-  if blade==0 or gas==0 then
+  if needsStation then
     local pos=gasTank()
     if pos then
       trace("gas tank")
+      S.refillAttempt=(S.refillAttempt or 0)+1
+      local offset=(S.refillAttempt%2==1) and 5 or 0
       w.root.AssemblyLinearVelocity=Vector3.new(0,0,0)
-      w.root.Position=pos+Vector3.new(5,0,0)
-      task.wait(0.4); tap(0x52); task.wait(1)
+      w.root.Position=pos+Vector3.new(offset,0,0)
+      w.root.AssemblyLinearVelocity=Vector3.new(0,0,0)
+      task.wait(0.5)
+      if not isrbxactive() then
+        S.refillSince=nil; S.stats.status="waiting for focus to refill"
+        return true
+      end
+      holdReload()
+      task.wait(1)
+      local afterBlade=tonumber((S.ui.blades and S.ui.blades.Text or ""):match("%d+")) or 0
+      local afterGas=tonumber((S.ui.gas and S.ui.gas.Text or ""):match("%d+")) or 0
+      boot(string.format("gas tank attempt %d: sets %d->%d gas %d->%d",
+        S.refillAttempt,blade,afterBlade,gas,afterGas))
     end
   else
     w.root.CFrame=CFrame.new(900,S.cfg.SafeHeight,900)
     w.root.AssemblyLinearVelocity=Vector3.new(0,0,0)
-    tap(0x52); task.wait(0.5)
+    task.wait(0.2)
+    if not isrbxactive() then
+      S.refillSince=nil; S.stats.status="waiting for focus to reload"
+      return true
+    end
+    holdReload()
+    task.wait(0.5)
   end
   return true
 end
@@ -519,6 +551,7 @@ local function menu()
   slider(attack,"PullExtraInterval","Extra Pull Spacing",30,200,1000," ms")
   slider(attack,"NapeSize","Nape Size",5,40,nil," studs")
   slider(attack,"AttackDelay","Slash Delay",30,300,1000," ms")
+  slider(attack,"MinSlashInterval","Minimum Slash Spacing",150,500,1000," ms")
   local heights=tune:AddRightGroupbox("Hover")
   for _,k in ipairs({"HeightNormal","HeightStall","HeightAttack","HeightColossal"}) do
     slider(heights,k,k,40,400,nil," studs")
@@ -628,15 +661,18 @@ task.spawn(function()
   while not stopped() do
     local now=os.clock()
     if now>=nextHover and S.cfg.Autofarm and S.mode=="farming" then
-      nextHover=now+0.05
+      nextHover=now+0.1
       local ok,err=pcall(hover)
       if not ok then boot("hover: "..tostring(err)) end
     end
     if now>=nextExtra and S.extraPending and S.target and S.cfg.PullAllNapes then
       nextExtra=now+math.max(0.03,S.cfg.PullExtraInterval)
       local e=S.extras[S.extraIndex]
-      if not e then S.extraPending=false
-      else S.extraIndex+=1; pcall(pull,e) end
+      S.extraPending=false
+      if e then
+        S.extraIndex=S.extraIndex%#S.extras+1
+        pcall(pull,e)
+      end
     end
     task.wait(0.016)
   end
@@ -702,9 +738,12 @@ while not stopped() do
           S.stats.status="quick time event"; task.wait(0.016)
         elseif S.form and now-S.shiftSince<2 then
           S.stats.status="shifting"; task.wait(0.1)
+        elseif not S.form and now-S.lastSlash<S.cfg.MinSlashInterval then
+          task.wait(0.03)
         else
           S.stats.status=S.form and "titan attacking" or "attacking"
           if not S.form then
+            S.lastSlash=now
             if S.cfg.PullAllNapes and not S.extraPending
               and (now-S.extraAt>0.5 or S.extraFor~=t.model.Address) then
               extras(t); S.extraFor=t.model.Address
@@ -713,7 +752,7 @@ while not stopped() do
             S.slash+=1
             if S.cfg.PullAllNapes and not S.extraPending
               and S.slash%math.max(1,S.cfg.PullEvery)==0 then
-              S.extraIndex=1; S.extraPending=true
+              S.extraPending=#S.extras>0
             end
           end
           task.wait()
