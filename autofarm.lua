@@ -18,6 +18,7 @@ local UserConfigs = {
   AutoRetry = true,       -- press Retry on the rewards screen
   AutoReload = true,      -- reload blades / refill gas when they run out
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
+  PullAllNapes = false,   -- pull every live titan's nape to the player, not just the target's
   KillTimeout = 10,       -- seconds before giving up on a titan
   AttackDelay = 0.06,     -- seconds between slashes
   BobAmplitude = 2,       -- studs of up/down bob while hovering
@@ -30,7 +31,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "NapeSize", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "NapeSize", "PullAllNapes", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "SafeHeight", "DebugMode",
 }
 
@@ -1087,6 +1088,13 @@ local function KillTitan(titan: Instance)
 
       local s = UserConfigs.NapeSize
       BringNapeToPlayer(titan, Vector3New(s, s, s))
+      if UserConfigs.PullAllNapes then
+        for _, other in pairs(KnownTitans) do
+          if other ~= titan and IsTitanAlive(other) and not IsTitanIgnored(other) then
+            BringNapeToPlayer(other, Vector3New(s, s, s))
+          end
+        end
+      end
       DebugPrint("debug", 4, nil, "KillTitan", "Attacking nape")
 
       task.wait()
@@ -1393,6 +1401,9 @@ local function buildMenu()
   local attack = tuning:AddLeftGroupbox("Attack")
   reg("NapeSize", attack:AddSlider("NapeSize", { Text = "Nape Size", Default = UserConfigs.NapeSize,
     Min = 5, Max = 40, Rounding = 0, Suffix = " studs", Callback = setter("NapeSize") }))
+  reg("PullAllNapes", attack:AddToggle("PullAllNapes", { Text = "Pull All Napes", Default = UserConfigs.PullAllNapes,
+    Tooltip = "Pull every live titan's nape to you so each slash can hit them all",
+    Callback = setter("PullAllNapes") }))
   reg("AttackDelay", attack:AddSlider("AttackDelay", { Text = "Slash Delay", Default = math.floor(UserConfigs.AttackDelay * 1000 + 0.5),
     Min = 30, Max = 300, Rounding = 0, Suffix = " ms", Callback = setter("AttackDelay", 1000) }))
   reg("KillTimeout", attack:AddSlider("KillTimeout", { Text = "Give Up After", Default = UserConfigs.KillTimeout,
