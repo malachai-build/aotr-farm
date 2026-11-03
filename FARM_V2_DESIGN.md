@@ -1,6 +1,6 @@
 # AoTR farm v2 design note
 
-`autofarm_v2.lua` is a new Matcha script. The live `autofarm.lua` and auto-exec loader are unchanged.
+`autofarm_v2.lua` is a new Matcha script. The auto-exec loader now reads `aotr/autofarm_v2.lua`. The previously deployed v1 has been copied into this repo as `autofarm.lua` and remains at `C:\matcha\workspace\aotr\autofarm.lua` as a rollback copy.
 
 - A collector refreshes character, titan, HUD, and QTE references every 0.4 seconds. The actor works from those cached references. No work runs in `RenderStepped`; hover writes are capped at 20 Hz and extra nape pulls are paced separately.
 - Every nape CFrame or Size write checks the titan's current parent address, fresh Humanoid.Health, and the weak part's current Hit parent. Freeze traces often ended near nape writes; writing dead titan napes was observed to raise the freeze rate.
@@ -14,6 +14,6 @@
 
 The staged `aotr/autofarm_v2.lua` passed Matcha's wrapped `loadstring` compile check. This check parses the file without starting the farm. Live farming behavior has not been tested because the deployed script is still in use.
 
-## Switch after approval
+## Switch and rollback
 
-Stop the current farm, then copy `C:\matcha\workspace\aotr\autofarm_v2.lua` to `C:\matcha\workspace\aotr\autofarm.lua` before the next auto-exec run. Keep the previous file as a rollback copy. The existing loader reads `aotr/autofarm.lua` and needs no edit.
+The next Matcha auto-exec run loads `C:\matcha\workspace\aotr\autofarm_v2.lua`. The current in-memory farm keeps running until Matcha reloads or the farm is stopped. To roll back, change the loader's two `aotr/autofarm_v2.lua` references to `aotr/autofarm.lua`.
