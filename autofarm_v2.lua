@@ -20,7 +20,7 @@ local S = {
   history={}, boxAt=0, lastBox="",
   slash=0, lastHover=0, lastPark=0, lastSlash=0, lastSkill=0,
   lastShift=0, shiftSince=0, form=false, lastBar=nil, barDrop=0,
-  qte={}, ui={}, retryCount=0, retrySince=nil, refillSince=nil,
+  qte={}, ui={}, retryCount=0, retrySince=nil, refillSince=nil, reloading=false, lastReload=-math.huge,
   sized={}, sizedCount=0, skipped=0, parkY=nil, wasFarm=false, wasEnd=false,
   legacySettings={},
 }
@@ -49,6 +49,8 @@ end
 S.diagnosticText=diagnosticText
 local function stopped() return _G.AotrStop == true or _G.AotrRunId ~= S.id end
 local function same(a,b) return a and b and a.Address and b.Address and a.Address == b.Address end
+local function finite(n) return type(n)=="number" and n==n and n>-math.huge and n<math.huge end
+local function finitePosition(p) return p and finite(p.X) and finite(p.Y) and finite(p.Z) end
 local function path(root, ...)
   local node = root
   for _, name in ipairs({...}) do
@@ -170,16 +172,19 @@ local function collect()
   end
   -- Keep a removed target until the actor records its kill.
 end
-local function choose()
+local function choose(recovery)
   local root=S.world.root
   if not root then return nil end
   local p=root.Position
   local best,d=nil,math.huge
+  local originValid=finitePosition(p)
   for _,e in ipairs(S.list) do
     if live(e) then
       local q=e.root.Position
-      local dist=(q-p).Magnitude
-      if dist<d and (not S.form or dist>3) and dist<4000 then best,d=e,dist end
+      if finitePosition(q) then
+        local dist=originValid and (q-p).Magnitude or math.huge
+        if (not best or dist<d) and (recovery or not S.form or dist>3) then best,d=e,dist end
+      end
     end
   end
   return best
@@ -230,7 +235,7 @@ end
 local function hover()
   local root=S.world.root
   if not root or not root.Parent then return end
-  if S.refillSince then return end -- do not pull away from the gas tank during refill
+  if S.refillSince or S.reloading then return end -- leave reload/refill positioning to the actor
   local now=os.clock()
   local t=S.target
   if t and live(t) and isrbxactive() then
@@ -353,6 +358,7 @@ local function form()
       local b=player:GetAttribute("Bar")
       if type(b)=="number" and b<bar then break end
     end
+    S.lastShift=os.clock() -- refill's settling window starts after the final shift input
   end
 end
 local function skill()
@@ -375,24 +381,34 @@ local function gasTank()
   for _,route in ipairs(routes) do
     local group=path(w,table.unpack(route))
     if group then
-      local part=group:FindFirstChild("Refill") or group.PrimaryPart
-      if part and part.Position then return part.Position end
+      local part=group:FindFirstChild("Refill") or group.Primary
+      if part then
+        local pos=part.Position
+        if finitePosition(pos) then return pos end
+      end
       local off=S.offsets
       if off and off.Model and off.BasePart and off.Primitive then
         local ok,pos=pcall(function()
           local p=memory_read("uintptr_t",group.Address+off.Model.PrimaryPart)
+          if not p or p==0 then return nil end
           local prim=memory_read("uintptr_t",p+off.BasePart.Primitive)
+          if not prim or prim==0 then return nil end
           local a=prim+off.Primitive.Position
           return Vector3.new(memory_read("float",a),memory_read("float",a+4),memory_read("float",a+8))
         end)
-        if ok then return pos end
+        if ok and finitePosition(pos) then return pos end
       end
     end
   end
 end
 local function supplies()
   local w=S.world
-  if S.form or not w.char or not w.root or not w.hum then return false end
+  if not w.char or not w.root or not w.hum then return false end
+  local okShift,shifter=pcall(function() return w.char:GetAttribute("Shifter") end)
+  if S.form or (okShift and shifter~=nil) then
+    S.refillSince=nil; S.reloading=false
+    return false
+  end
   local rig=w.char:FindFirstChild("Rig_"..w.player.Name)
   local rightHand=rig and rig:FindFirstChild("RightHand")
   local leftHand=rig and rig:FindFirstChild("LeftHand")
@@ -400,8 +416,9 @@ local function supplies()
   local right=rightHand:FindFirstChild("Blade_1")
   local left=leftHand:FindFirstChild("Blade_1")
   local off=S.offsets and S.offsets.BasePart and S.offsets.BasePart.Transparency
-  local broken=not right or not left
-  if not broken then
+  if not right or not left then S.refillSince=nil; S.reloading=false; return false end
+  local broken=false
+  do
     if not off then
       S.target=nil; S.stats.status="blade check unavailable"
       return true
@@ -416,28 +433,39 @@ local function supplies()
     end
     broken=result
   end
+  -- V1 deliberately enters both reload paths only after both blades break.
+  if not broken then S.refillSince=nil; S.reloading=false; return false end
   local blade=tonumber((S.ui.blades and S.ui.blades.Text or ""):match("%d+"))
   local gas=tonumber((S.ui.gas and S.ui.gas.Text or ""):match("%d+"))
   local needsStation=blade and gas and (blade==0 or gas==0)
-  if not broken and not needsStation then S.refillSince=nil; return false end
   if not isrbxactive() then
     S.target=nil; S.stats.status="waiting for focus to reload"
-    S.refillSince=nil
+    S.refillSince=nil; S.reloading=false
     return true
   end
-  S.target=nil; S.stats.status="reloading"; S.refillSince=S.refillSince or os.clock()
+  S.target=nil; S.reloading=true; S.stats.status="reloading"
   if needsStation then
+    S.refillSince=S.refillSince or os.clock()
+    -- V1 waits for BV to return; R during the blade animation is ignored.
+    if not w.root:FindFirstChild("BV") then
+      S.stats.status="waiting for blade animation"; task.wait(0.5)
+      return true
+    end
+    if os.clock()-S.lastShift<5 then
+      S.stats.status="waiting for shift inputs"; task.wait(0.5)
+      return true
+    end
     local pos=gasTank()
     if pos then
       trace("gas tank")
       S.refillAttempt=(S.refillAttempt or 0)+1
-      local offset=(S.refillAttempt%2==1) and 5 or 0
       w.root.AssemblyLinearVelocity=Vector3.new(0,0,0)
-      w.root.Position=pos+Vector3.new(offset,0,0)
+      task.wait(0.24)
+      w.root.Position=pos+Vector3.new(5,0,0)
       w.root.AssemblyLinearVelocity=Vector3.new(0,0,0)
       task.wait(0.5)
       if not isrbxactive() then
-        S.refillSince=nil; S.stats.status="waiting for focus to refill"
+        S.refillSince=nil; S.reloading=false; S.stats.status="waiting for focus to refill"
         return true
       end
       holdReload()
@@ -448,11 +476,19 @@ local function supplies()
         S.refillAttempt,blade,afterBlade,gas,afterGas))
     end
   else
+    S.refillSince=nil
+    if blade==nil or gas==nil then
+      S.stats.status="waiting for supply HUD"; task.wait(0.5)
+      return true
+    end
+    if os.clock()-S.lastReload<3 then
+      S.stats.status="waiting for blade reload"; task.wait(0.25)
+      return true
+    end
+    S.lastReload=os.clock()
     w.root.CFrame=CFrame.new(900,S.cfg.SafeHeight,900)
-    w.root.AssemblyLinearVelocity=Vector3.new(0,0,0)
-    task.wait(0.2)
     if not isrbxactive() then
-      S.refillSince=nil; S.stats.status="waiting for focus to reload"
+      S.refillSince=nil; S.reloading=false; S.stats.status="waiting for focus to reload"
       return true
     end
     holdReload()
@@ -482,15 +518,19 @@ local function giveUp()
   boot(S.stats.status)
   local start=os.clock()
   while not stopped() and os.clock()-start<30 do
-    local t=choose(); local root=S.world.root; local hum=S.world.hum
+    local t=choose(true); local root=S.world.root; local hum=S.world.hum
     if not hum or hum.Health<=0 then break end
     if t and root and live(t) then
-      root.AssemblyLinearVelocity=Vector3.new(0,0,0)
-      local p=t.root.Position; root.CFrame=CFrame.new(p.X,p.Y,p.Z)
+      local p=t.root.Position
+      if finitePosition(p) then
+        root.AssemblyLinearVelocity=Vector3.new(0,0,0)
+        root.CFrame=CFrame.new(p.X,p.Y,p.Z)
+      end
     end
     progress(); task.wait(2)
   end
   S.lastKill=os.clock()
+  S.refillSince=nil; S.reloading=false; S.stats.target="none"
 end
 local function box()
   local w=S.world
@@ -770,7 +810,7 @@ while not stopped() do
       task.wait(0.1)
     else
       phase("actor","combat checks")
-      S.refillSince=nil
+      S.refillSince=nil; S.reloading=false
       form()
       local t=S.target
       if t and not live(t) then

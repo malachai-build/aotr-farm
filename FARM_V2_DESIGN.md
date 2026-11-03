@@ -26,7 +26,7 @@ The v2 startup was also overwriting `trace.txt` before it archived the prior run
 
 The v2 refill reached a gas station but did not activate it. V2 had shortened the `R` press from v1's 500 ms to 50 ms. Gas refill and blade reload now hold `R` for 500 ms after a brief settle, and trace the key down/up steps.
 
-The next review found that v2 only entered refill handling after both blade models read broken. V1 also responded to empty gas or zero spare blade sets. V2 now enters station refill on either empty HUD counter, even with intact blades, and logs the counters before and after each station attempt. Repeated attempts alternate between the station position and five studs to its side. A focused live run logged `R` down/up for ordinary blade reloads and three station attempts. The third station attempt changed spare sets from `1` to `3` and gas from `0%` to `50%`; the farm resumed attacking. The watchdog restarted Matcha twice earlier in that run, so the separate freeze issue remains open.
+An intermediate v2 change incorrectly allowed an empty HUD counter to enter station refill even with intact blades. That change came from a mistaken reading of v1: v1's outer handler deliberately requires both blades to be broken before checking the HUD. A prior live run did log a successful station attempt, but the later ten-minute run exposed a persistent stall, so that isolated success did not establish a reliable fix. The intermediate trigger and alternating station position have now been removed; see the v1 reload restoration below.
 
 A no-extra diagnostic run lasted through a mission transition but still had a stale-heartbeat stop after about two minutes. Its archived trace contained repeated target-nape moves and no extras. The script now enforces a configurable 250 ms minimum between human slashes and target pulls. Each reload `R` down/up is also written to `boot.txt` so the next refill can be confirmed independently of the short trace ring.
 
@@ -45,6 +45,18 @@ Two recovery defects were confirmed by the source and live positions: recovery r
 There were 48 saved blackbox versions with a NaN height. Character probes also saw nonfinite velocity/body positions. Roblox's client log independently recorded 16 `Invalid CFrame. Must contain finite values` errors, with a stack in the game's `Core.Climb`, line 59 (`Near_Floor`), called by `Core.Runtime`, line 232. The initiating source of the invalid values is not yet established. Fresh character/root references matched the cached ones, and a later finite-position sample agreed with raw primitive memory. A game-module decompile attempt failed with an SSL error.
 
 The full report, ordered raw events, source/configuration snapshots, process metrics, and client error stacks were saved in the chat's `outputs/live-test-20261103-054938` evidence folder. These results support finite-value guards, a recovery-specific titan selector, fresh recovery timers, and separate tracking of gameplay progress. Those behavior changes were not included in the observation build.
+
+## Restore v1 reload flow and remove target range cap (2026-11-03)
+
+The user confirmed that the observation window was spent stuck in reload handling. Its lack of native freezes is not evidence of improved combat stability. A pre-fix live probe showed both blade transparency values at `0` (intact), empty HUD counters, and the old v2 waiting to reload. The HUD-only trigger was therefore entering the refill path contrary to v1's behavior.
+
+The restored flow requires both existing blade models to read broken before entering either supply path. Missing models do not force a reload. It checks the current character's Shifter attribute before interpreting human supply counters; waits for the root's `BV` marker before a station attempt; waits five seconds after the final shift input; and uses v1's velocity settle, fixed `+5` station offset, 500 ms R hold, and post-input wait. Ordinary blade reloads retain v1's three-second spacing. A dedicated reload flag prevents the hover worker from taking over reload positioning. Recovery clears the expired refill timer and reload flag on exit.
+
+The 4,000-stud cutoff has been removed from combat and recovery selection. Both consider live titans at any distance, selecting the nearest valid position. Recovery also bypasses the titan-form close-target filter. Nonfinite positions are rejected; station memory reads validate pointers before use.
+
+Eleven isolated checks ran the actual extracted source functions against plain mock objects in Matcha. They cover intact blades with empty HUD, missing blades, ordinary reload spacing, BV gating, station R eligibility, fresh Shifter state, distant combat/recovery targets, titan-form recovery, and refill timer reset. All passed, and the full file passed Matcha's wrapped compile check.
+
+The patched live run left the erroneous reload loop and selected a distant titan. It subsequently reported attacking, but no kill was observed and the user reported it remained ineffective. The client then returned to the lobby before a matched v1 comparison or successful refill could be verified. The reload safeguards and target selection changes are implemented; live farming and the separate combat freeze issue remain unverified.
 
 ## Switch and rollback
 
