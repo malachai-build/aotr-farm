@@ -32,6 +32,20 @@ A no-extra diagnostic run lasted through a mission transition but still had a st
 
 A direct-strike experiment avoided moving the nape but put the character close enough to titans to die after one kill, even with a higher position and enlarged nape. That mode was removed. Pull All Napes remains available in the menu but is off in the current live settings during stability diagnosis.
 
+## Focused ten-minute observation (2026-11-03, 05:49:38–05:59:38 Eastern)
+
+The diagnostic build adds fixed phase slots for actor, hover, collector, and reporter operations, caught-error counts, and a one-second diagnostic file. It exposes the cached state as `_G.AotrDiagnostic` for read-only execution probes. Combat behavior and saved settings were held constant during the window; controlled R and movement interventions were recorded separately.
+
+The recorder preserved 600 heartbeat and diagnostic samples, with a longest heartbeat update interval of 1.070 seconds. All 60 Matcha command probes responded, no watchdog restart occurred, and no caught farm error was recorded. The mission remained at six living titans and zero kills. This reproduces a gameplay stall rather than the earlier complete Matcha stops.
+
+Refill reliability remains unresolved despite the earlier successful attempt. All 24 automatic station attempts in this window failed to raise gas. The first three consumed the remaining spare sets. The station display still reported `REFILLS: 1 / 3 [R]`, and a separate two-second R hold also failed. A movement probe showed a successful root write being overwritten with the station position within 50 ms.
+
+Two recovery defects were confirmed by the source and live positions: recovery reuses the 4,000-stud combat selector even though all six remaining titans were 4,262–5,160 studs away, and `giveUp()` retains the expired refill timer. This produces repeated 30-second waits followed by just one refill attempt. Progress beats remain fresh because these waits call `progress()`, masking the absence of gameplay progress.
+
+There were 48 saved blackbox versions with a NaN height. Character probes also saw nonfinite velocity/body positions. Roblox's client log independently recorded 16 `Invalid CFrame. Must contain finite values` errors, with a stack in the game's `Core.Climb`, line 59 (`Near_Floor`), called by `Core.Runtime`, line 232. The initiating source of the invalid values is not yet established. Fresh character/root references matched the cached ones, and a later finite-position sample agreed with raw primitive memory. A game-module decompile attempt failed with an SSL error.
+
+The full report, ordered raw events, source/configuration snapshots, process metrics, and client error stacks were saved in the chat's `outputs/live-test-20261103-054938` evidence folder. These results support finite-value guards, a recovery-specific titan selector, fresh recovery timers, and separate tracking of gameplay progress. Those behavior changes were not included in the observation build.
+
 ## Switch and rollback
 
 The next Matcha auto-exec run loads `C:\matcha\workspace\aotr\autofarm_v2.lua`. The current in-memory farm keeps running until Matcha reloads or the farm is stopped. To roll back, change the loader's two `aotr/autofarm_v2.lua` references to `aotr/autofarm.lua`.

@@ -1,4 +1,4 @@
--- AoTR farm v2 for Matcha. Stage as aotr/autofarm_v2.lua; autoexec still loads autofarm.lua.
+-- AoTR farm v2 for Matcha. Autoexec loads aotr/autofarm_v2.lua.
 -- The loader must task.spawn(loadstring(readfile(...))) before its first yield.
 local S = {
   id = tostring(os.clock()) .. ":" .. tostring(math.random(1000000)),
@@ -26,6 +26,27 @@ local S = {
 }
 _G.AotrRunId = S.id
 _G.AotrStop = false
+-- Fixed diagnostic slots: no extra Roblox reads or writes in action markers.
+S.diag={actor={n=0},hover={n=0},collector={n=0},reporter={n=0},errors=0}
+_G.AotrDiagnostic=S
+local function phase(lane,name)
+  local d=S.diag[lane]
+  d.phase=name; d.at=os.clock(); d.n+=1
+end
+local function diagnosticText()
+  local now=os.clock()
+  local out={"run="..S.id,"clock="..string.format("%.3f",now),
+    "status="..S.stats.status,"kills="..S.stats.kills,"alive="..#S.list,
+    "target="..S.stats.target,"progressAge="..string.format("%.3f",now-S.progress),
+    "hoverAge="..string.format("%.3f",now-S.lastHover),"errors="..S.diag.errors}
+  for _,lane in ipairs({"actor","hover","collector","reporter"}) do
+    local d=S.diag[lane]
+    out[#out+1]=lane.."="..tostring(d.phase)..":"..string.format("%.3f",now-(d.at or now))..":"..d.n
+  end
+  if S.diag.error then out[#out+1]="error="..S.diag.error end
+  return table.concat(out," | ")
+end
+S.diagnosticText=diagnosticText
 local function stopped() return _G.AotrStop == true or _G.AotrRunId ~= S.id end
 local function same(a,b) return a and b and a.Address and b.Address and a.Address == b.Address end
 local function path(root, ...)
@@ -45,6 +66,10 @@ local function boot(msg)
     if #old > 12000 then old=string.sub(old,-6000) end
     writefile(p,old .. os.date("%H:%M:%S") .. " v2 " .. msg .. "\n")
   end)
+end
+local function fault(lane,err)
+  S.diag.errors+=1; S.diag.error=lane..": "..tostring(err)
+  boot(S.diag.error)
 end
 local function trace(step)
   local i=S.traceHead%32+1
@@ -177,6 +202,7 @@ local function extras(target)
   S.extraAt=os.clock()
 end
 local function pull(e)
+  phase("actor","pull validation")
   local root=S.world.root
   if not root or not live(e) then S.skipped+=1; return end
   if not S.target or not live(S.target) then return end
@@ -186,13 +212,17 @@ local function pull(e)
   local dest=root.CFrame*CFrame.new(0,S.cfg.NapeOffsetY,0)
   if (e.weak.Position-dest.Position).Magnitude>3 then
     trace("nape CFrame "..e.name)
+    phase("actor","nape CFrame begin")
     e.weak.CFrame=dest
+    phase("actor","nape CFrame done")
   end
   local size=math.floor(S.cfg.NapeSize)
   if S.sized[e.weak.Address]~=size then
     if not live(e) then S.skipped+=1; return end
     trace("nape Size "..e.name)
+    phase("actor","nape Size begin")
     e.weak.Size=Vector3.new(size,size,size)
+    phase("actor","nape Size done")
     S.sized[e.weak.Address]=size; S.sizedCount+=1
     if S.sizedCount>1000 then S.sized={}; S.sizedCount=0 end
   end
@@ -221,13 +251,17 @@ local function hover()
       if S.retreat then stand=pt+Vector3.new(0,S.cfg.HeightNormal,0)+away*S.cfg.TitanStrikeDistance
       else stand=sp+away*S.cfg.TitanStrikeDistance end
       trace("titan hover")
+      phase("hover","titan CFrame begin")
       root.CFrame=CFrame.lookAt(stand,Vector3.new(sp.X,stand.Y,sp.Z))
+      phase("hover","titan CFrame done")
       root.AssemblyLinearVelocity=Vector3.new(0,0,0)
     else
       local height=S.cfg["Height"..t.kind] or S.cfg.HeightNormal
       local bob=math.sin(now*math.pi*2)*S.cfg.BobAmplitude
       trace("human hover")
+      phase("hover","human CFrame begin")
       root.CFrame=CFrame.new(pt.X+S.cfg.HoverOffsetX,pt.Y+height+bob,pt.Z+S.cfg.HoverOffsetZ)
+      phase("hover","human CFrame done")
     end
     S.lastHover=now
     return
@@ -239,7 +273,9 @@ local function hover()
   -- Park only if drifted: zero gravity velocity while idle or unfocused.
   if math.abs(p.X-900)>15 or math.abs(p.Y-y)>15 or math.abs(p.Z-900)>15 then
     trace("park CFrame")
+    phase("hover","park CFrame begin")
     root.CFrame=CFrame.new(900,y,900)
+    phase("hover","park CFrame done")
   end
   if root.AssemblyLinearVelocity.Magnitude>1 then root.AssemblyLinearVelocity=Vector3.new(0,0,0) end
 end
@@ -282,9 +318,13 @@ end
 local function holdReload()
   trace("reload R down")
   boot("reload R down")
+  phase("actor","R keypress begin")
   keypress(0x52)
+  phase("actor","R held")
   task.wait(0.5)
+  phase("actor","R keyrelease begin")
   keyrelease(0x52)
+  phase("actor","R released")
   trace("reload R up")
   boot("reload R up")
 end
@@ -621,20 +661,25 @@ end)
 -- Start all persistent threads before this chunk's first yield.
 task.spawn(function()
   while not stopped() do
+    phase("collector","collect begin")
     local ok,err=pcall(collect)
-    if not ok then boot("collector: "..tostring(err)) end
+    if not ok then fault("collector",err) end
+    phase("collector","collect done")
     task.wait(0.4)
   end
 end)
 task.spawn(function()
   while not stopped() do
+    phase("reporter","heartbeat begin")
     local now=os.clock()
     local state=S.mode
     if (state=="farming" or state=="loading") and not S.heartbeatPaused
       and (state~="farming" or (now-S.progress<30
         and (not S.target or not isrbxactive() or now-S.lastHover<3))) then beat(state) end
     if now-S.boxAt>=1 then
+      phase("reporter","box begin")
       S.boxAt=now; S.lastBox=box()
+      phase("reporter","box done")
       if S.statusLabel then pcall(function() S.statusLabel.Text="AoTR v2 | "..S.lastBox end) end
       S.history[#S.history+1]=S.lastBox
       if #S.history>15 then table.remove(S.history,1) end
@@ -644,6 +689,8 @@ task.spawn(function()
       S.traceAt=now
       pcall(writefile,"aotr/trace.txt",traceText())
     end
+    phase("reporter","report done")
+    pcall(writefile,"aotr/diagnostic.txt",diagnosticText())
     task.wait(1)
   end
   if _G.AotrRunId==S.id then beat("unloaded") end
@@ -662,8 +709,10 @@ task.spawn(function()
     local now=os.clock()
     if now>=nextHover and S.cfg.Autofarm and S.mode=="farming" then
       nextHover=now+0.1
+      phase("hover","hover begin")
       local ok,err=pcall(hover)
-      if not ok then boot("hover: "..tostring(err)) end
+      if not ok then fault("hover",err) end
+      phase("hover","hover done")
     end
     if now>=nextExtra and S.extraPending and S.target and S.cfg.PullAllNapes then
       nextExtra=now+math.max(0.03,S.cfg.PullExtraInterval)
@@ -671,7 +720,8 @@ task.spawn(function()
       S.extraPending=false
       if e then
         S.extraIndex=S.extraIndex%#S.extras+1
-        pcall(pull,e)
+        local ok,err=pcall(pull,e)
+        if not ok then fault("extra pull",err) end
       end
     end
     task.wait(0.016)
@@ -691,6 +741,7 @@ while not stopped() and not S.world.titans and os.clock()-loadingAt<20 do task.w
 S.mode="farming"
 boot("world ready")
 while not stopped() do
+  phase("actor","iteration begin")
   progress()
   local now=os.clock()
   local farmDown=iskeypressed(0x75)
@@ -712,10 +763,13 @@ while not stopped() do
     if S.stats.status~="dead" then dump("death") end
     S.target=nil; S.stats.status="dead"; task.wait(0.5)
   else
+    phase("actor","supplies begin")
     if S.cfg.AutoReload and supplies() then
+      phase("actor","supplies handled")
       if S.refillSince and now-S.refillSince>20 then giveUp() end
       task.wait(0.1)
     else
+      phase("actor","combat checks")
       S.refillSince=nil
       form()
       local t=S.target
@@ -748,7 +802,8 @@ while not stopped() do
               and (now-S.extraAt>0.5 or S.extraFor~=t.model.Address) then
               extras(t); S.extraFor=t.model.Address
             end
-            pcall(pull,t)
+            local ok,err=pcall(pull,t)
+            if not ok then fault("target pull",err) end
             S.slash+=1
             if S.cfg.PullAllNapes and not S.extraPending
               and S.slash%math.max(1,S.cfg.PullEvery)==0 then
@@ -758,8 +813,11 @@ while not stopped() do
           task.wait()
           if live(t) and S.world.root and not stopped() then
             trace("click")
+            phase("actor","mouse click begin")
             mouse1click(); task.wait(0.03)
+            phase("actor","mouse click done")
             if S.form then skill() else tap(0x20) end
+            phase("actor","input done")
           end
           task.wait(math.max(0.03,S.cfg.AttackDelay))
         end
