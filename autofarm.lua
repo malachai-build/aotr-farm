@@ -33,12 +33,9 @@ end)
 -- While the state is "farming" and the file goes stale, the watchdog presses Retry from outside
 -- (Matcha does not reload when the character dies before load-in, so nothing runs in here then).
 -- "lobby" and "unloaded" tell it to stand down.
--- Freeze test (2026-11-03): the per-second "farming" and "loading" beats are off, to see whether
--- a writefile from the per-frame loop is what stops Matcha. "unloaded" is written once at start
--- so the watchdog stands down on the heartbeat instead of restarting Matcha every 5s; its "Matcha
--- not responding" restart still runs. The same flag turns off the black box file writes. Set
--- HEARTBEAT_TEST_OFF to false to restore both.
-local HEARTBEAT_TEST_OFF = true
+-- The heartbeat lets the PowerShell watcher restart Matcha if the farm stops progressing.
+-- This flag also controls the once-per-second black box file write.
+local HEARTBEAT_TEST_OFF = false
 local function Heartbeat(state)
   if HEARTBEAT_TEST_OFF and state ~= "lobby" and state ~= "unloaded" then return end
   pcall(writefile, "aotr/heartbeat.txt", state .. " " .. os.date("%H:%M:%S"))
@@ -771,13 +768,9 @@ local function IsTitanAlive(titan: Instance?): boolean
   if not titan.Parent then Info.Dead = true; return false end
   local TitanHumanoid = GetTitanHumanoid(titan); if not TitanHumanoid then return false end
 
-  local ok, health = pcall(function() return TitanHumanoid.Health end)
-  if not ok or type(health) ~= "number" then return false end
-
   Info.LastAliveCheck = now
-  Info.Alive = health > 0
-  if not Info.Alive then Info.Dead = true end
-  return Info.Alive
+  Info.Alive = true
+  return true
 end
 
 
@@ -889,20 +882,14 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
   if TargetHrp and (TargetHrp.Position - PlayerHrp.Position).Magnitude > PULL_MAX_DISTANCE then return end
   local Size = UserConfigs.NapeSize
   -- Pulled napes kill titans the farm is not targeting, and the alive cache (0.2s) and pull list
-  -- (0.5s) lag behind: a write into a dead or removed titan's nape (garbage memory in Matcha) is
-  -- the suspect behind the Matcha hangs with Pull All Napes on (2026-11-03). So before each write:
-  -- the titan is still in the Titans folder, its health read fresh is above 0, and the nape still
-  -- hangs off Hitboxes.Hit. A few cheap reads.
+  -- (0.5s) lag behind. Before each write:
+  -- the titan is still in the Titans folder and the nape still hangs off Hitboxes.Hit.
+  -- Matcha's native Health lookup can spin indefinitely when the underlying instance is stale.
   local FolderAddress = TitansFolder.Address
   local function Writable(titan: Instance, Nape: BasePart): boolean
     local Parent = titan.Parent; if not Parent or Parent.Address ~= FolderAddress then return false end
-    local Humanoid = GetTitanHumanoid(titan); if not Humanoid then return false end
-    local ok, health = pcall(function() return Humanoid.Health end)
-    if not ok or type(health) ~= "number" or health <= 0 then
-      local Cache = TitansCache[titan.Address]
-      if Cache and ok and type(health) == "number" then Cache.Info.Dead = true end
-      return false
-    end
+    local Cache = TitansCache[titan.Address]
+    if not Cache or Cache.Info.Dead or not GetTitanHumanoid(titan) then return false end
     local NapeParent = Nape.Parent
     return NapeParent ~= nil and NapeParent.Name == "Hit"
   end
