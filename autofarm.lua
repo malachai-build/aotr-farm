@@ -526,7 +526,6 @@ local TitanForm = false -- shifted into a titan; set by IsTitanForm, read by the
 local LastShiftBurstAt = -math.huge -- end of the last shift key burst; the refill waits for it to settle
 
 local ReloadingBlades: boolean = false
-local LastReloadingTime: number = 0
 
 local REFILL_STUCK_LIMIT = 20 -- seconds stuck refilling before letting a titan kill us
 local RefillStuckSince: number? = nil
@@ -1307,12 +1306,10 @@ local function HandleAllReloads()
 
   else   -- Case 2: Only needs to reload blades
     if ReloadingBlades then return end
-    if os.clock() - LastReloadingTime < 3 then return end
 
     DebugPrint("debug", 0, nil, nil, "Detected that the local player needs reloading.")
 
     ReloadingBlades = true
-    LastReloadingTime = os.clock()
 
     task.spawn(function()
       if not isrbxactive() then
@@ -1328,7 +1325,6 @@ local function HandleAllReloads()
       keypress(0x52)
       task.wait(0.5)
       keyrelease(0x52)
-      task.wait(0.5)
       Tr.step("reload", "done")
 
       ReloadingBlades = false
@@ -1969,7 +1965,7 @@ task.spawn(function() -- The main loop, where the magic happens
         CurrentTitanTarget = nil
         FarmStats.Status = "blades broken (auto reload off)"
       end
-      task.wait(1)
+      task.wait(0.1)
       continue
     end
 
