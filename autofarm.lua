@@ -1202,45 +1202,17 @@ local function GetNearestTitanAny(): Instance?
   return Best
 end
 
--- Stuck (out of blades with no refill, or no kill for minutes): stop hovering, sit on the nearest
--- titan and let it kill us so the run resets. The game has no reset button.
+-- Stop safely when recovery would otherwise move the player into a titan.
 local function GiveUpToTitan(reason: string?)
   reason = reason or "stuck refilling"
-  DebugPrint("warn", 0, nil, nil, reason .. ", letting a titan kill us.")
-  Boot(reason .. ", feeding a titan")
-  WhatShouldIBeDoing = "dying" -- the RenderStepped hover only runs while attacking
+  DebugPrint("warn", 0, nil, nil, reason .. ", pausing farm.")
+  Boot(reason .. ", pausing farm")
+  UserConfigs.Autofarm = false
+  WhatShouldIBeDoing = "paused"
   CurrentTitanTarget = nil
   FarmStats.Target = "none"
-  FarmStats.Status = reason .. ", feeding a titan"
-
-  local Started = os.clock()
-  local LastTp = 0
-
-  while not Stopped() and os.clock() - Started < 30 do
-    Progress()
-    local Humanoid = GetPlayerHumanoid(LocalPlayer)
-    local ok, health = pcall(function() return Humanoid.Health end)
-    if not ok or type(health) ~= "number" or health <= 0 then break end
-
-    -- Re-teleport every 2s (titans walk); CFrame writes are expensive, so not per frame.
-    if os.clock() - LastTp > 2 then
-      local Hrp = GetPlayerHrp(LocalPlayer)
-      local Titan = GetNearestTitanAny()
-      local TitanHrp = Titan and GetTitanHrp(Titan)
-      if Hrp and TitanHrp then
-        Hrp.AssemblyLinearVelocity = Vector3Zero
-        local p = TitanHrp.Position
-        Tr.step("main", "give up: tp onto titan (write)")
-        Hrp.CFrame = CFrame.new(p.X, p.Y, p.Z) -- matcha's CFrame.new rejects a single Vector3
-        LastTp = os.clock()
-      end
-    end
-
-    task.wait(0.25)
-  end
-
+  FarmStats.Status = reason .. ", paused"
   RefillStuckSince = nil
-  WhatShouldIBeDoing = "attack"
 end
 
 
@@ -1266,7 +1238,10 @@ local function HandleAllReloads()
       -- Shifting mid-refill left the titan hanging at the reload spot (2026-11-02): drop the refill.
       local okShift, Shifter = pcall(function() return LocalPlayer.Character:GetAttribute("Shifter") end)
       if TitanForm or (okShift and Shifter ~= nil) then RefillStuckSince = nil; WhatShouldIBeDoing = "attack"; break end
-      if os.clock() - RefillStuckSince > REFILL_STUCK_LIMIT then GiveUpToTitan(); return end
+      if os.clock() - RefillStuckSince > REFILL_STUCK_LIMIT then
+        GiveUpToTitan()
+        return
+      end
       if IsReloadingBlades() then
         task.wait(0.5)
         continue
