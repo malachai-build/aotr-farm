@@ -112,6 +112,7 @@ local UserConfigs = {
   PriorityPerks = { "", "", "", "", "", "" },
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
+  PullBossLimbs = false,  -- pull every raid boss hitbox limb onto the player
   PullRadius = 5000,      -- studs from the target that Pull All Napes reaches; 5000 (the max) = whole map
   PullCount = 6,          -- napes stacked per slash, target included; blade hits cap at ~6 titans
   MenuDisabled = false,   -- skip the menu (edit aotr_farm.json); F6/End and the status line still work
@@ -141,7 +142,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
@@ -911,9 +912,7 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
     local NapeParent = Nape.Parent
     return NapeParent ~= nil and NapeParent.Name == "Hit"
   end
-  local function Place(titan: Instance)
-    Tr.step("main", "pull: find nape")
-    local Nape = GetTitanWeakSpot(titan); if not Nape then return end
+  local function PlacePart(titan: Instance, Nape: BasePart)
     Tr.step("main", "pull: live check")
     if not Writable(titan, Nape) then SkippedNapes += 1; return end
     -- Read per nape: with a frame between napes the player has moved since the last one.
@@ -933,6 +932,22 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
       HeavyWrites += 1
       if not SizedNapes[Key] then SizedNapesCount += 1 end
       SizedNapes[Key] = Size
+    end
+  end
+  local function Place(titan: Instance)
+    Tr.step("main", "pull: find weak spot")
+    local WeakSpot = GetTitanWeakSpot(titan); if not WeakSpot then return end
+    PlacePart(titan, WeakSpot)
+    if not UserConfigs.PullBossLimbs or not IsBossTitan(titan) then return end
+    local Hitboxes = titan:FindFirstChild("Hitboxes")
+    local Hit = Hitboxes and Hitboxes:FindFirstChild("Hit")
+    if not Hit then return end
+    for _, part in ipairs(Hit:GetChildren()) do
+      if Stopped() or not IsValid(PlayerHrp) then break end
+      if part.Address ~= WeakSpot.Address and part:IsA("BasePart") then
+        task.wait() -- avoid a burst of native writes that can stall Matcha
+        PlacePart(titan, part)
+      end
     end
   end
   Place(target)
@@ -3056,6 +3071,11 @@ local function buildMenu()
   end })
   session:AddButton({ Text = "Reset kill stats", Func = function() FarmStats.Kills, FarmStats.Timeouts = 0, 0 end })
   session:AddButton({ Text = "Unload (End)", Func = Unload })
+
+  local boss = main:AddRightGroupbox("Raid Boss")
+  reg("PullBossLimbs", boss:AddToggle("PullBossLimbs", { Text = "Pull All Limbs", Default = UserConfigs.PullBossLimbs,
+    Tooltip = "Stack a raid boss's hitbox limbs for each slash; extra damage is unverified",
+    Callback = setter("PullBossLimbs") }))
 
   local shifting = main:AddLeftGroupbox("Titan Shifting")
   reg("ShiftEnabled", shifting:AddToggle("ShiftEnabled", { Text = "Auto Shift", Default = UserConfigs.ShiftEnabled,
