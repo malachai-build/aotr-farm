@@ -106,7 +106,7 @@ local UserConfigs = {
   AutoReload = true,      -- reload blades / refill gas when they run out
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
-  AutoStationUpgrades = true, -- after equipment, buy HQ Max HP twice, Regen up to five total, Refills on even waves
+  AutoStationUpgrades = true, -- buy Regen first, then HQ Max HP twice; Refills on even waves
   AutoPerks = true,       -- choose the strongest owned perks after Waves tasks
   AutoMarket = true,      -- buy missing priority perks from Orange before upgrades
   PriorityPerks = { "", "", "", "", "", "" },
@@ -1796,10 +1796,11 @@ end
 local PerkManager
 local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil,
   EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0,
-  UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0,
+  UpgradePending = false, MaxClicks = 0, RegenClicks = 0, RefillsClicks = 0, NextUpgradeAttempt = 0,
   MarketPending = false, RoundNumber = nil, RegenPlanned = 0, RefillsPlanned = 0 }
 CrateRoute.WaveState = { JobId = game.JobId, Wave = "", RegenTotal = 0,
-  EquipmentClicks = 0, HQClicks = 0, RegenPlanned = 0, RefillsPlanned = 0, MarketAttempts = {} }
+  EquipmentClicks = 0, MaxClicks = 0, RegenClicks = 0, RefillsClicks = 0,
+  RegenPlanned = 0, RefillsPlanned = 0, MarketAttempts = {}, Maxed = {} }
 pcall(function()
   if type(isfile) == "function" and not isfile("aotr/waves_purchases.json") then return end
   local saved = HttpService:JSONDecode(readfile("aotr/waves_purchases.json"))
@@ -1808,14 +1809,33 @@ pcall(function()
     CrateRoute.WaveState.Wave = type(saved.Wave) == "string" and saved.Wave or ""
     CrateRoute.WaveState.RegenTotal = math.clamp(tonumber(saved.RegenTotal) or 0, 0, 5)
     CrateRoute.WaveState.EquipmentClicks = math.clamp(tonumber(saved.EquipmentClicks) or 0, 0, 5)
-    CrateRoute.WaveState.HQClicks = math.clamp(tonumber(saved.HQClicks) or 0, 0, 5)
+    CrateRoute.WaveState.MaxClicks = math.clamp(tonumber(saved.MaxClicks) or 0, 0, 2)
+    CrateRoute.WaveState.RegenClicks = math.clamp(tonumber(saved.RegenClicks) or 0, 0, 2)
+    CrateRoute.WaveState.RefillsClicks = math.clamp(tonumber(saved.RefillsClicks) or 0, 0, 1)
     CrateRoute.WaveState.RegenPlanned = math.clamp(tonumber(saved.RegenPlanned) or 0, 0, 2)
     CrateRoute.WaveState.RefillsPlanned = math.clamp(tonumber(saved.RefillsPlanned) or 0, 0, 1)
+    CrateRoute.WaveState.Maxed = type(saved.Maxed) == "table" and saved.Maxed or {}
     CrateRoute.WaveState.MarketAttempts = type(saved.MarketAttempts) == "table" and saved.MarketAttempts or {}
   end
 end)
 function CrateRoute.SaveWaveState()
   pcall(writefile, "aotr/waves_purchases.json", HttpService:JSONEncode(CrateRoute.WaveState))
+end
+function CrateRoute.RefreshUpgradePending()
+  local maxed = CrateRoute.WaveState.Maxed or {}
+  CrateRoute.UpgradePending = (CrateRoute.RegenClicks < CrateRoute.RegenPlanned and not maxed.Regen)
+    or (CrateRoute.MaxClicks < 2 and not maxed.Max)
+    or (CrateRoute.RefillsClicks < CrateRoute.RefillsPlanned and not maxed.Refills)
+end
+function CrateRoute.ApplyWaveState()
+  CrateRoute.EquipmentClicks = CrateRoute.WaveState.EquipmentClicks
+  CrateRoute.MaxClicks = CrateRoute.WaveState.MaxClicks
+  CrateRoute.RegenClicks = CrateRoute.WaveState.RegenClicks
+  CrateRoute.RefillsClicks = CrateRoute.WaveState.RefillsClicks
+  CrateRoute.RegenPlanned = CrateRoute.WaveState.RegenPlanned
+  CrateRoute.RefillsPlanned = CrateRoute.WaveState.RefillsPlanned
+  CrateRoute.EquipmentPending = CrateRoute.EquipmentClicks < 5
+  CrateRoute.RefreshUpgradePending()
 end
 function CrateRoute.BeginWave(round: number?, crate: Instance)
   local wave = round and tostring(round) or "crate:" .. tostring(crate.Address)
@@ -1823,7 +1843,10 @@ function CrateRoute.BeginWave(round: number?, crate: Instance)
   if CrateRoute.WaveState.Wave ~= wave then
     CrateRoute.WaveState.Wave = wave
     CrateRoute.WaveState.EquipmentClicks = 0
-    CrateRoute.WaveState.HQClicks = 0
+    CrateRoute.WaveState.MaxClicks = 0
+    CrateRoute.WaveState.RegenClicks = 0
+    CrateRoute.WaveState.RefillsClicks = 0
+    CrateRoute.WaveState.Maxed = {}
     CrateRoute.WaveState.RegenPlanned = math.min(2, 5 - CrateRoute.WaveState.RegenTotal)
     CrateRoute.WaveState.RefillsPlanned = round and round % 2 == 0 and 1 or 0
     CrateRoute.WaveState.MarketAttempts = {}
@@ -1832,12 +1855,8 @@ function CrateRoute.BeginWave(round: number?, crate: Instance)
     PerkManager.SurveyPending = true
     CrateRoute.SaveWaveState()
   end
-  CrateRoute.EquipmentClicks = CrateRoute.WaveState.EquipmentClicks
-  CrateRoute.UpgradeClicks = CrateRoute.WaveState.HQClicks
-  CrateRoute.RegenPlanned = CrateRoute.WaveState.RegenPlanned
-  CrateRoute.RefillsPlanned = CrateRoute.WaveState.RefillsPlanned
-  CrateRoute.EquipmentPending = CrateRoute.EquipmentClicks < 5
-  CrateRoute.UpgradePending = CrateRoute.UpgradeClicks < 2 + CrateRoute.RegenPlanned + CrateRoute.RefillsPlanned
+  CrateRoute.ResumedWave = true
+  CrateRoute.ApplyWaveState()
 end
 function CrateRoute.ReadRound(): number?
   local Hud = Interface:FindFirstChild("HUD")
@@ -1846,6 +1865,17 @@ function CrateRoute.ReadRound(): number?
   local Clearance = Main and Main:FindFirstChild("Clearance")
   local Cleared = Clearance and string.match(Clearance.Text or "", "Waves Cleared%s*%[(%d+)%s*/")
   return Cleared and tonumber(Cleared) + 1 or nil
+end
+function CrateRoute.ResumeSavedWave()
+  if CrateRoute.ResumedWave then return end
+  local current = CrateRoute.ReadRound()
+  if not current then return end
+  CrateRoute.ResumedWave = true
+  if tostring(current) == CrateRoute.WaveState.Wave then
+    CrateRoute.RoundNumber = current
+    CrateRoute.ApplyWaveState()
+    Boot("resumed wave " .. current .. " upgrade receipt")
+  end
 end
 function CrateRoute.GetOwned(): Instance?
   if not UserConfigs.AutoCrates or TitanForm then return nil end
@@ -1949,8 +1979,35 @@ function CrateRoute.ClickButton(Button: Instance, fallbackX: number, fallbackY: 
   mouse1click()
 end
 
+function CrateRoute.ReadGold(menu: Instance): number?
+  local gold = menu:FindFirstChild("Gold")
+  local title = gold and gold:FindFirstChild("Title")
+  if not title then return nil end
+  return tonumber(((title.Text or ""):gsub("[^%d]", "")))
+end
+
+function CrateRoute.BuyPrice(button: Instance): number?
+  local title = button:FindFirstChild("Title")
+  local text = title and title.Text or ""
+  if not string.match(text, "^BUY") then return nil end
+  local price = string.match(text, "%(([%d,]+)%)")
+  return price and tonumber(((price:gsub(",", "")))) or nil
+end
+
+function CrateRoute.SpentGold(menu: Instance, before: number, description: Instance?, oldDescription: string?): boolean
+  for _ = 1, 10 do
+    task.wait(0.15)
+    local now = CrateRoute.ReadGold(menu)
+    if now and now < before then return true end
+    if description and oldDescription and description.Text ~= oldDescription then return true end
+  end
+  return false
+end
+
 function CrateRoute.HandleEquipment(): boolean
   if not UserConfigs.AutoEquipmentUpgrades or not CrateRoute.EquipmentPending then return false end
+  if UserConfigs.AutoStationUpgrades and CrateRoute.RegenClicks < CrateRoute.RegenPlanned
+    and not (CrateRoute.WaveState.Maxed or {}).Regen then return false end
   if Qte.Active or IsTitanForm() or not isrbxactive() or os.clock() < CrateRoute.NextEquipmentAttempt then return false end
   local Waves = Workspace:FindFirstChild("Waves")
   local NPCs = Waves and Waves:FindFirstChild("NPCs")
@@ -2001,14 +2058,25 @@ function CrateRoute.HandleEquipment(): boolean
   if CrateRoute.EquipmentMenuOpen() and not Stopped() then
     FarmStats.Status = "buying equipment upgrades"
     while CrateRoute.EquipmentClicks < 5 and not Stopped() and UserConfigs.AutoCrates and isrbxactive() and CrateRoute.EquipmentMenuOpen() do
+      local beforeGold = CrateRoute.ReadGold(Equipment)
+      if not beforeGold or beforeGold <= 0 then
+        Boot("equipment Upgrade All deferred: no gold available")
+        CrateRoute.NextEquipmentAttempt = os.clock() + 15
+        break
+      end
+      CrateRoute.ClickButton(All, 0.063, 0.019)
+      if not CrateRoute.SpentGold(Equipment, beforeGold) then
+        Boot("equipment Upgrade All did not spend gold; count stays " .. CrateRoute.EquipmentClicks .. "/5")
+        CrateRoute.NextEquipmentAttempt = os.clock() + 15
+        break
+      end
       CrateRoute.EquipmentClicks += 1
       CrateRoute.WaveState.EquipmentClicks = CrateRoute.EquipmentClicks
       CrateRoute.SaveWaveState()
-      CrateRoute.ClickButton(All, 0.063, 0.019)
-      Boot("equipment Upgrade All click " .. CrateRoute.EquipmentClicks .. "/5")
+      Boot("equipment Upgrade All purchased " .. CrateRoute.EquipmentClicks .. "/5")
       task.wait(0.55)
     end
-    if CrateRoute.EquipmentClicks == 5 and isrbxactive() then
+    if isrbxactive() then
       FarmStats.Status = "closing equipment"
       for attempt = 1, 3 do
         if Stopped() or not CrateRoute.EquipmentMenuOpen() then break end
@@ -2016,8 +2084,10 @@ function CrateRoute.HandleEquipment(): boolean
         task.wait(0.45)
       end
       if not CrateRoute.EquipmentMenuOpen() then
-        CrateRoute.EquipmentPending = false
-        Boot("equipment upgrades finished; menu closed")
+        if CrateRoute.EquipmentClicks == 5 then
+          CrateRoute.EquipmentPending = false
+          Boot("equipment upgrades finished; menu closed")
+        end
       else
         Boot("equipment X click did not close menu")
       end
@@ -2043,7 +2113,6 @@ end
 
 function CrateRoute.HandleUpgrade(): boolean
   if not UserConfigs.AutoStationUpgrades or not CrateRoute.UpgradePending then return false end
-  if UserConfigs.AutoEquipmentUpgrades and CrateRoute.EquipmentPending then return false end
   if Qte.Active or IsTitanForm() or not isrbxactive() or os.clock() < CrateRoute.NextUpgradeAttempt then return false end
   local Waves = Workspace:FindFirstChild("Waves")
   local NPCs = Waves and Waves:FindFirstChild("NPCs")
@@ -2086,21 +2155,65 @@ function CrateRoute.HandleUpgrade(): boolean
 
   if CrateRoute.UpgradeMenuOpen() and not Stopped() then
     FarmStats.Status = "buying HQ upgrades"
-    local TargetClicks = 2 + CrateRoute.RegenPlanned + CrateRoute.RefillsPlanned
-    while CrateRoute.UpgradeClicks < TargetClicks do
+    while CrateRoute.UpgradePending do
       if Stopped() or not UserConfigs.AutoCrates or not isrbxactive() or not CrateRoute.UpgradeMenuOpen() then break end
-      local index = CrateRoute.UpgradeClicks + 1
-      local isRegen = index > 2 and index <= 2 + CrateRoute.RegenPlanned
-      local Button = index <= 2 and MaxBuy or isRegen and RegenBuy or RefillsBuy
-      CrateRoute.UpgradeClicks = index
-      CrateRoute.WaveState.HQClicks = index
-      if isRegen then CrateRoute.WaveState.RegenTotal = math.min(5, CrateRoute.WaveState.RegenTotal + 1) end
-      CrateRoute.SaveWaveState()
-      CrateRoute.ClickButton(Button, 0.043, 0.016)
-      Boot("HQ " .. (index <= 2 and "Max HP" or isRegen and "Regen" or "Refills") .. " click " .. index .. "/" .. TargetClicks)
+      local maxed = CrateRoute.WaveState.Maxed or {}
+      local kind, group, button
+      if CrateRoute.RegenClicks < CrateRoute.RegenPlanned and not maxed.Regen then
+        kind, group, button = "Regen", Regen, RegenBuy
+      elseif CrateRoute.MaxClicks < 2 and not maxed.Max then
+        kind, group, button = "Max", Max, MaxBuy
+      elseif CrateRoute.RefillsClicks < CrateRoute.RefillsPlanned and not maxed.Refills then
+        kind, group, button = "Refills", Refills, RefillsBuy
+      else
+        CrateRoute.RefreshUpgradePending()
+        break
+      end
+      local description = group:FindFirstChild("Description")
+      local beforeDescription = description and description.Text
+      local beforeGold = CrateRoute.ReadGold(Upgrade)
+      local price = CrateRoute.BuyPrice(button)
+      if not price then
+        local label = button:FindFirstChild("Title")
+        if label and string.match(label.Text or "", "^MAX") then
+          CrateRoute.WaveState.Maxed[kind] = true
+          CrateRoute.SaveWaveState()
+          CrateRoute.RefreshUpgradePending()
+          Boot("HQ " .. kind .. " already maxed")
+        else
+          Boot("HQ " .. kind .. " price unavailable; retry later")
+          CrateRoute.NextUpgradeAttempt = os.clock() + 15
+          break
+        end
+      elseif not beforeGold or beforeGold < price then
+        Boot("HQ " .. kind .. " deferred: " .. tostring(beforeGold) .. " gold < " .. price)
+        CrateRoute.NextUpgradeAttempt = os.clock() + 15
+        break
+      else
+        CrateRoute.ClickButton(button, 0.043, 0.016)
+        if not CrateRoute.SpentGold(Upgrade, beforeGold, description, beforeDescription) then
+          Boot("HQ " .. kind .. " did not spend gold; count unchanged")
+          CrateRoute.NextUpgradeAttempt = os.clock() + 15
+          break
+        end
+        if kind == "Regen" then
+          CrateRoute.RegenClicks += 1
+          CrateRoute.WaveState.RegenClicks = CrateRoute.RegenClicks
+          CrateRoute.WaveState.RegenTotal = math.min(5, CrateRoute.WaveState.RegenTotal + 1)
+        elseif kind == "Max" then
+          CrateRoute.MaxClicks += 1
+          CrateRoute.WaveState.MaxClicks = CrateRoute.MaxClicks
+        else
+          CrateRoute.RefillsClicks += 1
+          CrateRoute.WaveState.RefillsClicks = CrateRoute.RefillsClicks
+        end
+        CrateRoute.SaveWaveState()
+        CrateRoute.RefreshUpgradePending()
+        Boot("HQ " .. kind .. " purchased; gold " .. beforeGold .. " -> " .. tostring(CrateRoute.ReadGold(Upgrade)))
+      end
       task.wait(0.55)
     end
-    if CrateRoute.UpgradeClicks == TargetClicks and isrbxactive() then
+    if isrbxactive() then
       FarmStats.Status = "closing HQ upgrades"
       for _ = 1, 3 do
         if Stopped() or not CrateRoute.UpgradeMenuOpen() then break end
@@ -2108,8 +2221,7 @@ function CrateRoute.HandleUpgrade(): boolean
         task.wait(0.45)
       end
       if not CrateRoute.UpgradeMenuOpen() then
-        CrateRoute.UpgradePending = false
-        Boot("HQ upgrades finished; menu closed")
+        if not CrateRoute.UpgradePending then Boot("HQ upgrades finished; menu closed") end
       else
         Boot("HQ upgrade X click did not close menu")
       end
@@ -2767,11 +2879,12 @@ task.spawn(function() -- The main loop, where the magic happens
       task.wait(0.1)
       continue
     end
-    if CrateRoute.HandleEquipment() then
+    CrateRoute.ResumeSavedWave()
+    if CrateRoute.HandleUpgrade() then
       task.wait(0.1)
       continue
     end
-    if CrateRoute.HandleUpgrade() then
+    if CrateRoute.HandleEquipment() then
       task.wait(0.1)
       continue
     end
@@ -3050,7 +3163,7 @@ local function buildMenu()
     Tooltip = "After crate delivery, visit Lulu and click Upgrade All five times",
     Callback = setter("AutoEquipmentUpgrades") }))
   reg("AutoStationUpgrades", farm:AddToggle("AutoStationUpgrades", { Text = "Auto HQ Upgrades", Default = UserConfigs.AutoStationUpgrades,
-    Tooltip = "Once per wave: Max HP twice, Regen up to five total, Refills on even waves",
+    Tooltip = "Regen first, up to five successful buys total; then Max HP twice and Refills on even waves",
     Callback = setter("AutoStationUpgrades") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
     Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
