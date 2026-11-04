@@ -1798,45 +1798,44 @@ local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, La
   EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0,
   UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0,
   MarketPending = false, RoundNumber = nil, RegenPlanned = 0, RefillsPlanned = 0 }
-local WAVE_STATE_FILE = "aotr/waves_purchases.json"
-local WaveState = { JobId = game.JobId, Wave = "", RegenTotal = 0,
+CrateRoute.WaveState = { JobId = game.JobId, Wave = "", RegenTotal = 0,
   EquipmentClicks = 0, HQClicks = 0, RegenPlanned = 0, RefillsPlanned = 0, MarketAttempts = {} }
 pcall(function()
-  if type(isfile) == "function" and not isfile(WAVE_STATE_FILE) then return end
-  local saved = HttpService:JSONDecode(readfile(WAVE_STATE_FILE))
+  if type(isfile) == "function" and not isfile("aotr/waves_purchases.json") then return end
+  local saved = HttpService:JSONDecode(readfile("aotr/waves_purchases.json"))
   if type(saved) == "table" and saved.JobId == game.JobId then
-    WaveState = saved
-    WaveState.Wave = type(saved.Wave) == "string" and saved.Wave or ""
-    WaveState.RegenTotal = math.clamp(tonumber(saved.RegenTotal) or 0, 0, 5)
-    WaveState.EquipmentClicks = math.clamp(tonumber(saved.EquipmentClicks) or 0, 0, 5)
-    WaveState.HQClicks = math.clamp(tonumber(saved.HQClicks) or 0, 0, 5)
-    WaveState.RegenPlanned = math.clamp(tonumber(saved.RegenPlanned) or 0, 0, 2)
-    WaveState.RefillsPlanned = math.clamp(tonumber(saved.RefillsPlanned) or 0, 0, 1)
-    WaveState.MarketAttempts = type(saved.MarketAttempts) == "table" and saved.MarketAttempts or {}
+    CrateRoute.WaveState = saved
+    CrateRoute.WaveState.Wave = type(saved.Wave) == "string" and saved.Wave or ""
+    CrateRoute.WaveState.RegenTotal = math.clamp(tonumber(saved.RegenTotal) or 0, 0, 5)
+    CrateRoute.WaveState.EquipmentClicks = math.clamp(tonumber(saved.EquipmentClicks) or 0, 0, 5)
+    CrateRoute.WaveState.HQClicks = math.clamp(tonumber(saved.HQClicks) or 0, 0, 5)
+    CrateRoute.WaveState.RegenPlanned = math.clamp(tonumber(saved.RegenPlanned) or 0, 0, 2)
+    CrateRoute.WaveState.RefillsPlanned = math.clamp(tonumber(saved.RefillsPlanned) or 0, 0, 1)
+    CrateRoute.WaveState.MarketAttempts = type(saved.MarketAttempts) == "table" and saved.MarketAttempts or {}
   end
 end)
 function CrateRoute.SaveWaveState()
-  pcall(writefile, WAVE_STATE_FILE, HttpService:JSONEncode(WaveState))
+  pcall(writefile, "aotr/waves_purchases.json", HttpService:JSONEncode(CrateRoute.WaveState))
 end
 function CrateRoute.BeginWave(round: number?, crate: Instance)
   local wave = round and tostring(round) or "crate:" .. tostring(crate.Address)
   CrateRoute.RoundNumber = round
-  if WaveState.Wave ~= wave then
-    WaveState.Wave = wave
-    WaveState.EquipmentClicks = 0
-    WaveState.HQClicks = 0
-    WaveState.RegenPlanned = math.min(2, 5 - WaveState.RegenTotal)
-    WaveState.RefillsPlanned = round and round % 2 == 0 and 1 or 0
-    WaveState.MarketAttempts = {}
+  if CrateRoute.WaveState.Wave ~= wave then
+    CrateRoute.WaveState.Wave = wave
+    CrateRoute.WaveState.EquipmentClicks = 0
+    CrateRoute.WaveState.HQClicks = 0
+    CrateRoute.WaveState.RegenPlanned = math.min(2, 5 - CrateRoute.WaveState.RegenTotal)
+    CrateRoute.WaveState.RefillsPlanned = round and round % 2 == 0 and 1 or 0
+    CrateRoute.WaveState.MarketAttempts = {}
     CrateRoute.MarketPending = true
     PerkManager.Pending = true
     PerkManager.SurveyPending = true
     CrateRoute.SaveWaveState()
   end
-  CrateRoute.EquipmentClicks = WaveState.EquipmentClicks
-  CrateRoute.UpgradeClicks = WaveState.HQClicks
-  CrateRoute.RegenPlanned = WaveState.RegenPlanned
-  CrateRoute.RefillsPlanned = WaveState.RefillsPlanned
+  CrateRoute.EquipmentClicks = CrateRoute.WaveState.EquipmentClicks
+  CrateRoute.UpgradeClicks = CrateRoute.WaveState.HQClicks
+  CrateRoute.RegenPlanned = CrateRoute.WaveState.RegenPlanned
+  CrateRoute.RefillsPlanned = CrateRoute.WaveState.RefillsPlanned
   CrateRoute.EquipmentPending = CrateRoute.EquipmentClicks < 5
   CrateRoute.UpgradePending = CrateRoute.UpgradeClicks < 2 + CrateRoute.RegenPlanned + CrateRoute.RefillsPlanned
 end
@@ -2003,7 +2002,7 @@ function CrateRoute.HandleEquipment(): boolean
     FarmStats.Status = "buying equipment upgrades"
     while CrateRoute.EquipmentClicks < 5 and not Stopped() and UserConfigs.AutoCrates and isrbxactive() and CrateRoute.EquipmentMenuOpen() do
       CrateRoute.EquipmentClicks += 1
-      WaveState.EquipmentClicks = CrateRoute.EquipmentClicks
+      CrateRoute.WaveState.EquipmentClicks = CrateRoute.EquipmentClicks
       CrateRoute.SaveWaveState()
       CrateRoute.ClickButton(All, 0.063, 0.019)
       Boot("equipment Upgrade All click " .. CrateRoute.EquipmentClicks .. "/5")
@@ -2094,8 +2093,8 @@ function CrateRoute.HandleUpgrade(): boolean
       local isRegen = index > 2 and index <= 2 + CrateRoute.RegenPlanned
       local Button = index <= 2 and MaxBuy or isRegen and RegenBuy or RefillsBuy
       CrateRoute.UpgradeClicks = index
-      WaveState.HQClicks = index
-      if isRegen then WaveState.RegenTotal = math.min(5, WaveState.RegenTotal + 1) end
+      CrateRoute.WaveState.HQClicks = index
+      if isRegen then CrateRoute.WaveState.RegenTotal = math.min(5, CrateRoute.WaveState.RegenTotal + 1) end
       CrateRoute.SaveWaveState()
       CrateRoute.ClickButton(Button, 0.043, 0.016)
       Boot("HQ " .. (index <= 2 and "Max HP" or isRegen and "Regen" or "Refills") .. " click " .. index .. "/" .. TargetClicks)
@@ -2372,8 +2371,8 @@ end
 
 -- Orange's Market rotates every wave. Buying a perk is immediate: the Buy button is
 -- the purchase itself, so only click a listing after name, stock, gold and ownership checks.
-local MarketManager = { NextAttempt = 0 }
-function MarketManager.MenuOpen(): boolean
+CrateRoute.MarketManager = { NextAttempt = 0 }
+function CrateRoute.MarketManager.MenuOpen(): boolean
   local Market = Interface:FindFirstChild("Market")
   local Categories = Market and Market:FindFirstChild("Categories")
   local Perks = Categories and Categories:FindFirstChild("Market_Perks")
@@ -2384,7 +2383,7 @@ function MarketManager.MenuOpen(): boolean
   return p ~= nil and Viewport ~= nil and p.Y > Viewport.Y * 0.03 and p.Y < Viewport.Y * 0.3
 end
 
-function MarketManager.Scan()
+function CrateRoute.MarketManager.Scan()
   local Market = Interface:FindFirstChild("Market")
   local Main = Market and Market:FindFirstChild("Main")
   local Items = Main and Main:FindFirstChild("Items")
@@ -2414,11 +2413,11 @@ function MarketManager.Scan()
   return listings, amount, onPerksPage
 end
 
-function MarketManager.Handle(): boolean
+function CrateRoute.MarketManager.Handle(): boolean
   if not UserConfigs.AutoMarket or not UserConfigs.AutoPerks or not CrateRoute.MarketPending then return false end
   if PerkManager.SurveyPending or not PerkManager.Owned then return false end
   if not UserConfigs.MenuDisabled and (not UI or not UI.ready) then return false end
-  if Qte.Active or IsTitanForm() or not isrbxactive() or not IsLocalAlive() or os.clock() < MarketManager.NextAttempt then return false end
+  if Qte.Active or IsTitanForm() or not isrbxactive() or not IsLocalAlive() or os.clock() < CrateRoute.MarketManager.NextAttempt then return false end
 
   local Waves = Workspace:FindFirstChild("Waves")
   local NPCs = Waves and Waves:FindFirstChild("NPCs")
@@ -2438,7 +2437,7 @@ function MarketManager.Handle(): boolean
   end
   if not Hrp or not TabButton or not Close then return false end
 
-  MarketManager.NextAttempt = os.clock() + 5
+  CrateRoute.MarketManager.NextAttempt = os.clock() + 5
   CurrentTitanTarget = nil
   FarmStats.Target, FarmStats.Status = "market", "checking market"
   WhatShouldIBeDoing = "market"
@@ -2447,7 +2446,7 @@ function MarketManager.Handle(): boolean
     pcall(function() UI.window:Hide() end)
     task.wait(0.12)
   end
-  if not MarketManager.MenuOpen() then
+  if not CrateRoute.MarketManager.MenuOpen() then
     local at = NpcHrp.Position
     Hrp.AssemblyLinearVelocity = Vector3Zero
     Hrp.CFrame = CFrame.new(at.X + 4, at.Y, at.Z - 2)
@@ -2455,7 +2454,7 @@ function MarketManager.Handle(): boolean
     task.wait(0.45)
     for _ = 1, 12 do
       if Stopped() or not UserConfigs.AutoMarket or not isrbxactive() or not IsLocalAlive() then break end
-      if MarketManager.MenuOpen() then break end
+      if CrateRoute.MarketManager.MenuOpen() then break end
       keypress(0x45)
       task.wait(0.15)
       keyrelease(0x45)
@@ -2463,17 +2462,17 @@ function MarketManager.Handle(): boolean
     end
   end
 
-  if MarketManager.MenuOpen() and not Stopped() and isrbxactive() then
+  if CrateRoute.MarketManager.MenuOpen() and not Stopped() and isrbxactive() then
     task.wait(0.55)
-    local listings, gold, onPerksPage = MarketManager.Scan()
+    local listings, gold, onPerksPage = CrateRoute.MarketManager.Scan()
     if listings and not onPerksPage then
       CrateRoute.ClickButton(TabButton, 0.025, 0.04)
       task.wait(0.45)
-      listings, gold, onPerksPage = MarketManager.Scan()
+      listings, gold, onPerksPage = CrateRoute.MarketManager.Scan()
       -- An empty Perks page has no named cards from which to identify the tab.
-      if listings and #listings == 0 and MarketManager.MenuOpen() then onPerksPage = true end
+      if listings and #listings == 0 and CrateRoute.MarketManager.MenuOpen() then onPerksPage = true end
     end
-    if listings and onPerksPage and MarketManager.MenuOpen() then
+    if listings and onPerksPage and CrateRoute.MarketManager.MenuOpen() then
       local priority = {}
       for _, name in ipairs(UserConfigs.PriorityPerks) do
         if name ~= "" then priority[PerkManager.Key(name)] = true end
@@ -2481,14 +2480,14 @@ function MarketManager.Handle(): boolean
       Boot("market checked on wave " .. tostring(CrateRoute.RoundNumber or CrateRoute.ReadRound() or "?")
         .. ": " .. tostring(#listings) .. " perk listings, " .. tostring(gold) .. " gold")
       for _, listing in ipairs(listings) do
-        if Stopped() or not UserConfigs.AutoMarket or not isrbxactive() or not MarketManager.MenuOpen() then break end
+        if Stopped() or not UserConfigs.AutoMarket or not isrbxactive() or not CrateRoute.MarketManager.MenuOpen() then break end
         if priority[listing.Key] and not PerkManager.Owned[listing.Key]
-          and not WaveState.MarketAttempts[listing.Key] and listing.Count > 0 then
+          and not CrateRoute.WaveState.MarketAttempts[listing.Key] and listing.Count > 0 then
           -- Read Gold again because an earlier buy in this same visit may have spent it.
           local GoldTitle = Market.Gold and Market.Gold:FindFirstChild("Title")
           local currentGold = GoldTitle and tonumber((GoldTitle.Text or ""):gsub("[^%d]", "")) or 0
           if currentGold >= listing.Price then
-            WaveState.MarketAttempts[listing.Key] = true -- never repeat an unconfirmed immediate purchase
+            CrateRoute.WaveState.MarketAttempts[listing.Key] = true -- never repeat an unconfirmed immediate purchase
             CrateRoute.SaveWaveState()
             CrateRoute.ClickButton(listing.Buy, 0.031, 0.022)
             local purchased = false
@@ -2510,11 +2509,11 @@ function MarketManager.Handle(): boolean
         end
       end
       for _ = 1, 3 do
-        if not MarketManager.MenuOpen() or not isrbxactive() then break end
+        if not CrateRoute.MarketManager.MenuOpen() or not isrbxactive() then break end
         CrateRoute.ClickButton(Close, 0.012, 0.021)
         task.wait(0.45)
       end
-      if not MarketManager.MenuOpen() then
+      if not CrateRoute.MarketManager.MenuOpen() then
         CrateRoute.MarketPending = false
         Boot("market check complete; menu closed")
       else
@@ -2758,7 +2757,7 @@ task.spawn(function() -- The main loop, where the magic happens
       if PerkManager.SurveyPending then
         if PerkManager.Handle() then task.wait(0.1); continue end
       else
-        if MarketManager.Handle() then task.wait(0.1); continue end
+        if CrateRoute.MarketManager.Handle() then task.wait(0.1); continue end
       end
       FarmStats.Status = "waiting for market check"
       task.wait(0.5)
