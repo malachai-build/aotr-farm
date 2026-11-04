@@ -104,6 +104,7 @@ local UserConfigs = {
   Autofarm = true,
   AutoRetry = true,       -- press Retry on the rewards screen
   AutoReload = true,      -- reload blades / refill gas when they run out
+  AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
   PullRadius = 5000,      -- studs from the target that Pull All Napes reaches; 5000 (the max) = whole map
@@ -135,7 +136,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
@@ -1757,6 +1758,74 @@ local function UpdateRobloxState()
   CurrentRobloxState = isrbxactive() and "Active" or "Inactive"
 end
 
+-- Waves places a separate Crate_<player> model each round. The static map also has dozens of
+-- decorative Crates; only the player-specific model has a touch-enabled Hitbox.
+local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil }
+function CrateRoute.GetOwned(): Instance?
+  if not UserConfigs.AutoCrates or TitanForm then return nil end
+  local now = os.clock()
+  if now < CrateRoute.NextCheck and CrateRoute.Cached and CrateRoute.Cached.Parent then return CrateRoute.Cached end
+  if now < CrateRoute.NextCheck then return nil end
+  CrateRoute.NextCheck = now + 0.5
+  local Waves = Workspace:FindFirstChild("Waves")
+  local Crates = Waves and Waves:FindFirstChild("Crates")
+  CrateRoute.Cached = Crates and Crates:FindFirstChild("Crate_" .. LocalPlayer.Name) or nil
+  return CrateRoute.Cached
+end
+
+function CrateRoute.Pending(): boolean
+  if Qte.Active then return false end
+  local Crate = CrateRoute.GetOwned()
+  return Crate ~= nil and (Crate.Address ~= CrateRoute.LastAttemptAddress or os.clock() - CrateRoute.LastAttemptAt > 5)
+end
+
+function CrateRoute.Handle(): boolean
+  if not CrateRoute.Pending() then return false end
+  if IsTitanForm() then return false end
+  local Crate = CrateRoute.GetOwned(); if not Crate then return false end
+  local Hitbox = Crate:FindFirstChild("Hitbox"); if not Hitbox or not Hitbox:IsA("BasePart") then return false end
+  local Waves = Workspace:FindFirstChild("Waves")
+  local Props = Waves and Waves:FindFirstChild("Props")
+  local Dropoff = Props and Props:FindFirstChild("Dropoff")
+  local Cart = Dropoff and Dropoff:FindFirstChild("Cart")
+  if not Cart or not Cart:IsA("BasePart") then return false end
+  local Hrp = GetPlayerHrp(LocalPlayer); if not Hrp then return false end
+
+  CrateRoute.LastAttemptAddress = Crate.Address
+  CrateRoute.LastAttemptAt = os.clock()
+  CurrentTitanTarget = nil
+  FarmStats.Target = "crate"
+  WhatShouldIBeDoing = "crate"
+  FarmStats.Status = "collecting crate"
+  local ok, err = pcall(function()
+    local at = Hitbox.Position
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    -- Fall through the touch volume so the TouchInterest sees physical contact.
+    Hrp.CFrame = CFrame.new(at.X, at.Y + Hitbox.Size.Y / 2 + 4, at.Z)
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+  end)
+  if not ok then Boot("crate pickup move failed: " .. tostring(err)) end
+  if ok then
+    Boot("crate pickup touch attempted")
+    task.wait(0.65)
+    if not Stopped() and UserConfigs.Autofarm and IsLocalAlive() then
+      FarmStats.Status = "delivering crate"
+      local delivered, dropErr = pcall(function()
+        local at = Cart.Position
+        Hrp.AssemblyLinearVelocity = Vector3Zero
+        Hrp.CFrame = CFrame.new(at.X, at.Y + Cart.Size.Y / 2 + 4, at.Z)
+        Hrp.AssemblyLinearVelocity = Vector3Zero
+      end)
+      if not delivered then Boot("crate dropoff move failed: " .. tostring(dropErr))
+      else Boot("crate dropoff touch attempted") end
+      task.wait(0.65)
+      Boot("crate after dropoff: " .. (Crate.Parent and "still present" or "removed"))
+    end
+  end
+  if not Stopped() then WhatShouldIBeDoing = "attack" end
+  return true
+end
+
 
 local function KillTitan(titan: Instance)
   DebugPrint("debug", 3, nil, "KillTitan", "Starting kill sequence for:", titan.Name)
@@ -1779,6 +1848,7 @@ local function KillTitan(titan: Instance)
     task.wait(UserConfigs.AttackDelay)
     Tr.step("main", "kill checks")
     if Stopped() or not UserConfigs.Autofarm then break end
+    if CrateRoute.Pending() then break end
     if not IsTitanAlive(titan) then
       FarmStats.Kills += 1
       print(string.format("[Aotr] %s down after %.1fs", titan.Name:sub(1, 8), os.clock() - StartTime))
@@ -1973,6 +2043,11 @@ task.spawn(function() -- The main loop, where the magic happens
       if FarmStats.Status ~= "dead, waiting to respawn" and FarmStats.Status ~= "starting" and FarmStats.Status ~= "pressing retry" then LogDeath("main loop, was " .. FarmStats.Status) end
       FarmStats.Status = "dead, waiting to respawn"
       task.wait(1)
+      continue
+    end
+
+    if CrateRoute.Handle() then
+      task.wait(0.1)
       continue
     end
 
@@ -2236,6 +2311,9 @@ local function buildMenu()
   reg("AutoReload", farm:AddToggle("AutoReload", { Text = "Auto Reload / Refill", Default = UserConfigs.AutoReload,
     Tooltip = "Reload blades at the safe spot; refill at the gas tank on maps the script knows",
     Callback = setter("AutoReload") }))
+  reg("AutoCrates", farm:AddToggle("AutoCrates", { Text = "Auto Crate Delivery", Default = UserConfigs.AutoCrates,
+    Tooltip = "Touch your spawned Waves crate, then the drop-off cart",
+    Callback = setter("AutoCrates") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
     Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
   reg("NoKillMinutes", farm:AddSlider("NoKillMinutes", { Text = "Reset After No Kill", Default = UserConfigs.NoKillMinutes,
