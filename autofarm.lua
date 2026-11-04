@@ -106,6 +106,7 @@ local UserConfigs = {
   AutoReload = true,      -- reload blades / refill gas when they run out
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
+  AutoStationUpgrades = true, -- after equipment, buy HQ Max HP and Regen once each
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
   PullRadius = 5000,      -- studs from the target that Pull All Napes reaches; 5000 (the max) = whole map
@@ -137,7 +138,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
@@ -1762,7 +1763,8 @@ end
 -- Waves places a separate Crate_<player> model each round. The static map also has dozens of
 -- decorative Crates; only the player-specific model has a touch-enabled Hitbox.
 local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil,
-  EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0 }
+  EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0,
+  UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0 }
 function CrateRoute.GetOwned(): Instance?
   if not UserConfigs.AutoCrates or TitanForm then return nil end
   local now = os.clock()
@@ -1825,6 +1827,8 @@ function CrateRoute.Handle(): boolean
       if not Crate.Parent then
         CrateRoute.EquipmentPending = true
         CrateRoute.EquipmentClicks = 0
+        CrateRoute.UpgradePending = true
+        CrateRoute.UpgradeClicks = 0
       end
     end
   end
@@ -1914,6 +1918,92 @@ function CrateRoute.HandleEquipment(): boolean
     end
   else
     Boot("equipment menu did not open")
+  end
+  if not Stopped() then WhatShouldIBeDoing = "attack" end
+  return true
+end
+
+function CrateRoute.UpgradeMenuOpen(): boolean
+  local Upgrade = Interface:FindFirstChild("Upgrade")
+  local Main = Upgrade and Upgrade:FindFirstChild("Main")
+  local Upgrades = Main and Main:FindFirstChild("Upgrades")
+  local Max = Upgrades and Upgrades:FindFirstChild("Max")
+  local Buy = Max and Max:FindFirstChild("Max_Use")
+  local Position = Buy and Buy.AbsolutePosition
+  local Camera = Workspace.CurrentCamera
+  local Viewport = Camera and Camera.ViewportSize
+  return Position ~= nil and Viewport ~= nil and Position.Y < Viewport.Y * 0.78
+end
+
+function CrateRoute.HandleUpgrade(): boolean
+  if not UserConfigs.AutoStationUpgrades or not CrateRoute.UpgradePending then return false end
+  if UserConfigs.AutoEquipmentUpgrades and CrateRoute.EquipmentPending then return false end
+  if Qte.Active or IsTitanForm() or not isrbxactive() or os.clock() < CrateRoute.NextUpgradeAttempt then return false end
+  local Waves = Workspace:FindFirstChild("Waves")
+  local NPCs = Waves and Waves:FindFirstChild("NPCs")
+  local Cole = NPCs and NPCs:FindFirstChild("Cole")
+  local NpcHrp = Cole and Cole:FindFirstChild("HumanoidRootPart")
+  local Hrp = GetPlayerHrp(LocalPlayer)
+  local Upgrade = Interface:FindFirstChild("Upgrade")
+  local Main = Upgrade and Upgrade:FindFirstChild("Main")
+  local Upgrades = Main and Main:FindFirstChild("Upgrades")
+  local Max = Upgrades and Upgrades:FindFirstChild("Max")
+  local Regen = Upgrades and Upgrades:FindFirstChild("Regen")
+  local MaxBuy = Max and Max:FindFirstChild("Max_Use")
+  local RegenBuy = Regen and Regen:FindFirstChild("Regen_Use")
+  local CloseFrame = Upgrade and Upgrade:FindFirstChild("Upgrade_Close")
+  local Close = CloseFrame and CloseFrame:FindFirstChild("Interact")
+  if not NpcHrp or not Hrp or not MaxBuy or not RegenBuy or not Close then return false end
+
+  CurrentTitanTarget = nil
+  FarmStats.Target = "HQ upgrades"
+  FarmStats.Status = "opening HQ upgrades"
+  WhatShouldIBeDoing = "upgrade"
+  CrateRoute.NextUpgradeAttempt = os.clock() + 5
+  if not CrateRoute.UpgradeMenuOpen() then
+    local at = NpcHrp.Position
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    Hrp.CFrame = CFrame.new(at.X + 4, at.Y, at.Z - 2)
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    task.wait(0.45)
+    for _ = 1, 12 do
+      if Stopped() or not UserConfigs.Autofarm or not isrbxactive() or not IsLocalAlive() then break end
+      if CrateRoute.UpgradeMenuOpen() then break end
+      keypress(0x45)
+      task.wait(0.15)
+      keyrelease(0x45)
+      task.wait(0.4)
+    end
+  end
+
+  if CrateRoute.UpgradeMenuOpen() and not Stopped() then
+    FarmStats.Status = "buying HQ upgrades"
+    for _, Button in ipairs({ MaxBuy, RegenBuy }) do
+      if CrateRoute.UpgradeClicks >= 2 then break end
+      if CrateRoute.UpgradeClicks == 0 or Button == RegenBuy then
+        if Stopped() or not UserConfigs.Autofarm or not isrbxactive() or not CrateRoute.UpgradeMenuOpen() then break end
+        CrateRoute.ClickButton(Button, 0.043, 0.016)
+        CrateRoute.UpgradeClicks += 1
+        Boot("HQ " .. (CrateRoute.UpgradeClicks == 1 and "Max HP" or "Regen") .. " click")
+        task.wait(0.55)
+      end
+    end
+    if CrateRoute.UpgradeClicks == 2 and isrbxactive() then
+      FarmStats.Status = "closing HQ upgrades"
+      for _ = 1, 3 do
+        if Stopped() or not CrateRoute.UpgradeMenuOpen() then break end
+        CrateRoute.ClickButton(Close, 0.012, 0.021)
+        task.wait(0.45)
+      end
+      if not CrateRoute.UpgradeMenuOpen() then
+        CrateRoute.UpgradePending = false
+        Boot("HQ upgrades finished; menu closed")
+      else
+        Boot("HQ upgrade X click did not close menu")
+      end
+    end
+  else
+    Boot("HQ upgrade menu did not open")
   end
   if not Stopped() then WhatShouldIBeDoing = "attack" end
   return true
@@ -2144,6 +2234,10 @@ task.spawn(function() -- The main loop, where the magic happens
       continue
     end
     if CrateRoute.HandleEquipment() then
+      task.wait(0.1)
+      continue
+    end
+    if CrateRoute.HandleUpgrade() then
       task.wait(0.1)
       continue
     end
@@ -2414,6 +2508,9 @@ local function buildMenu()
   reg("AutoEquipmentUpgrades", farm:AddToggle("AutoEquipmentUpgrades", { Text = "Auto Equipment Upgrades", Default = UserConfigs.AutoEquipmentUpgrades,
     Tooltip = "After crate delivery, visit Lulu and click Upgrade All five times",
     Callback = setter("AutoEquipmentUpgrades") }))
+  reg("AutoStationUpgrades", farm:AddToggle("AutoStationUpgrades", { Text = "Auto HQ Upgrades", Default = UserConfigs.AutoStationUpgrades,
+    Tooltip = "After crate delivery and equipment, buy Max HP and Regen at Cole's station",
+    Callback = setter("AutoStationUpgrades") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
     Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
   reg("NoKillMinutes", farm:AddSlider("NoKillMinutes", { Text = "Reset After No Kill", Default = UserConfigs.NoKillMinutes,
