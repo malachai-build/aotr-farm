@@ -294,7 +294,6 @@ local PlayerGui = nil; repeat task.wait(0.03);  PlayerGui = LocalPlayer:FindFirs
 
 local TitansFolder = nil; repeat task.wait(0.03); TitansFolder = Workspace:FindFirstChild("Titans") until TitansFolder
 local Interface = nil; repeat task.wait(0.03); Interface = PlayerGui:FindFirstChild("Interface") until Interface
-local CharactersFolder = nil; repeat task.wait(0.03); CharactersFolder = Workspace:FindFirstChild("Characters") until CharactersFolder
 Boot("waiting for titans")
 -- Bounded: on a mission-end screen no titans ever spawn, and the main loop (Auto Retry, heartbeat)
 -- has to run to get out of it. An unbounded wait here stalled a run for ~5 hours.
