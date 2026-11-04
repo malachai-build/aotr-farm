@@ -107,6 +107,8 @@ local UserConfigs = {
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
   AutoStationUpgrades = true, -- after equipment, buy HQ Max HP and Regen twice; Refills on even waves
+  AutoPerks = true,       -- choose the strongest owned perks after Waves tasks
+  PriorityPerks = { "", "", "", "", "", "" },
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
   PullRadius = 5000,      -- studs from the target that Pull All Napes reaches; 5000 (the max) = whole map
@@ -138,7 +140,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "PriorityPerks", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
@@ -161,6 +163,19 @@ pcall(function()
     if d[k] ~= nil and type(d[k]) == type(UserConfigs[k]) then UserConfigs[k] = d[k] end
   end
 end)
+
+-- Saved lists may come from an older or manually edited settings file.
+do
+  local cleaned, seen = {}, {}
+  for i = 1, 6 do
+    local name = type(UserConfigs.PriorityPerks) == "table" and UserConfigs.PriorityPerks[i] or nil
+    name = type(name) == "string" and name or ""
+    if seen[name] then name = "" end
+    cleaned[i] = name
+    if name ~= "" then seen[name] = true end
+  end
+  UserConfigs.PriorityPerks = cleaned
+end
 
 -- Stop switch: `_G.AotrStop = true` (or the menu's Unload) halts every loop and the hover teleport.
 -- Each run takes a fresh id, so re-running (auto-exec, then by hand) stops the old copy, and the
@@ -1762,6 +1777,7 @@ end
 
 -- Waves places a separate Crate_<player> model each round. The static map also has dozens of
 -- decorative Crates; only the player-specific model has a touch-enabled Hitbox.
+local PerkManager
 local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil,
   EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0,
   UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0, RoundNumber = nil }
@@ -1839,11 +1855,23 @@ function CrateRoute.Handle(): boolean
         CrateRoute.EquipmentClicks = 0
         CrateRoute.UpgradePending = true
         CrateRoute.UpgradeClicks = 0
+        PerkManager.Pending = true
       end
     end
   end
   if not Stopped() then WhatShouldIBeDoing = "attack" end
   return true
+end
+
+function CrateRoute.EquipmentRootOpen(): boolean
+  local Equipment = Interface:FindFirstChild("Equipment")
+  local Categories = Equipment and Equipment:FindFirstChild("Categories")
+  local Upgrades = Categories and Categories:FindFirstChild("Equipment_Upgrades")
+  local Inner = Upgrades and Upgrades:FindFirstChild("Inner")
+  local Button = Inner and Inner:FindFirstChild("Interact")
+  local Viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+  local Position = Button and Button.AbsolutePosition
+  return Position ~= nil and Viewport ~= nil and Position.Y > Viewport.Y * 0.03 and Position.Y < Viewport.Y * 0.3
 end
 
 function CrateRoute.EquipmentMenuOpen(): boolean
@@ -1879,16 +1907,20 @@ function CrateRoute.HandleEquipment(): boolean
   local Equipment = Interface:FindFirstChild("Equipment")
   local Stats = Equipment and Equipment:FindFirstChild("Stats")
   local All = Stats and Stats:FindFirstChild("All")
+  local Categories = Equipment and Equipment:FindFirstChild("Categories")
+  local Upgrades = Categories and Categories:FindFirstChild("Equipment_Upgrades")
+  local Inner = Upgrades and Upgrades:FindFirstChild("Inner")
+  local UpgradesTab = Inner and Inner:FindFirstChild("Interact")
   local CloseFrame = Equipment and Equipment:FindFirstChild("Equipment_Close")
   local Close = CloseFrame and CloseFrame:FindFirstChild("Interact")
-  if not NpcHrp or not Hrp or not All or not Close then return false end
+  if not NpcHrp or not Hrp or not All or not UpgradesTab or not Close then return false end
 
   CurrentTitanTarget = nil
   FarmStats.Target = "equipment"
   FarmStats.Status = "opening equipment"
   WhatShouldIBeDoing = "equipment"
   CrateRoute.NextEquipmentAttempt = os.clock() + 5
-  if not CrateRoute.EquipmentMenuOpen() then
+  if not CrateRoute.EquipmentRootOpen() then
     local at = NpcHrp.Position
     Hrp.AssemblyLinearVelocity = Vector3Zero
     Hrp.CFrame = CFrame.new(at.X + 4, at.Y, at.Z - 2)
@@ -1896,11 +1928,20 @@ function CrateRoute.HandleEquipment(): boolean
     task.wait(0.45)
     for _ = 1, 12 do
       if Stopped() or not UserConfigs.AutoCrates or not isrbxactive() or not IsLocalAlive() then break end
-      if CrateRoute.EquipmentMenuOpen() then break end
+      if CrateRoute.EquipmentRootOpen() then break end
       keypress(0x45)
       task.wait(0.15)
       keyrelease(0x45)
       task.wait(0.4)
+    end
+  end
+
+  if CrateRoute.EquipmentRootOpen() and not CrateRoute.EquipmentMenuOpen() and isrbxactive() then
+    task.wait(0.55)
+    for _ = 1, 3 do
+      if Stopped() or not CrateRoute.EquipmentRootOpen() or CrateRoute.EquipmentMenuOpen() then break end
+      CrateRoute.ClickButton(UpgradesTab, 0.025, 0.04)
+      task.wait(0.45)
     end
   end
 
@@ -2022,6 +2063,244 @@ function CrateRoute.HandleUpgrade(): boolean
   return true
 end
 
+
+-- Perk names and rarities from the AoTR Perks wiki, read 2026-11-04. The GUI cards
+-- carry the perk name but not a useful rarity label, so keep this catalog local.
+local UI
+PerkManager = { Pending = true, NextCheck = 0 }
+PerkManager.Tiers = {
+  [1] = "ENHANCED METABOLISM|ENDURING|FORTITUDE|CRIPPLE|HOLLOW|LUCKY|MIGHTY|FIRST AID|GEAR BEGINNER",
+  [2] = "CRITICAL HUNTER|HEIGHTENED VITALITY|PROTECTION|TOUGH|UNYIELDING|BLESSED|FORCEFUL|LIGHTWEIGHT|MANGLE|EXPERIMENTAL SHELLS|FULLY STOCKED|GEAR INTERMEDIATE",
+  [3] = "RESILIENT|SOLO|HARDY|SAFEGUARD|STALWART DURABILITY|UNBREAKABLE|BUTCHER|FLAWED RELEASE|FOCUS|LUMINOUS|MUTILATE|PEERLESS STRENGTH|RECKLESS ABANDON|SPEEDY|WARRIOR|ADRENALINE|GEAR EXPERT|MUNITIONS EXPERT|SIPHONING|TRAUMA BATTERY",
+  [4] = "FLAME RHAPSODY|INDEFATIGABLE|PERFECT FORM|PERFECT SOUL|TYRANT'S STARE|WIND RHAPSODY|AEGIS|FONT OF VITALITY|INVINCIBLE|PEERLESS CONSTITUTION|ROBUST|BOMBARDIER|CARNIFEX|EVISCERATE|PEERLESS FOCUS|SANCTIFIED|UNPARALLELED STRENGTH|WARCHIEF|COURAGE CATALYST|EXHUMATION|GEAR MASTER|MUNITIONS MASTER|PEERLESS COMMANDER|SIXTH SENSE",
+  [5] = "FOUNDER'S BLESSING|HEAVENLY RESTRICTION|MAXIMUM FIREPOWER|ADAPTATION|IMMORTAL|ART OF WAR|BLACK FLASH|BLITZKREIG|EVERLASTING FLAME|KENGO|EXPLOSIVE FORTUNE|FONT OF INSPIRATION|SOULFEED|TATSUJIN|UNWAVERING BELIEF",
+  [6] = "AVATAR OF YMIR|MANKIND’S STRONGEST|SANGUINE DESTROYER|ETERNAL|FORESIGHT|GODFORGED|STORMWRATH|15TH COMMANDER|BRANCHING PATHS|WINGS OF FREEDOM",
+}
+PerkManager.Rarity, PerkManager.Names = {}, {}
+for tier, names in ipairs(PerkManager.Tiers) do
+  for name in string.gmatch(names, "[^|]+") do
+    PerkManager.Rarity[name:gsub("’", "'")] = tier
+    table.insert(PerkManager.Names, name)
+  end
+end
+table.sort(PerkManager.Names)
+
+function PerkManager.Key(name: string): string
+  return string.upper((name or ""):gsub("’", "'"):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+function PerkManager.SearchOptions(query: string, selected: string)
+  local options, seen = { "None" }, { None = true }
+  if selected ~= "" then table.insert(options, selected); seen[selected] = true end
+  local needle = PerkManager.Key(query)
+  for _, name in ipairs(PerkManager.Names) do
+    if #options >= 8 then break end
+    if not seen[name] and (needle == "" or string.find(PerkManager.Key(name), needle, 1, true)) then
+      table.insert(options, name)
+      seen[name] = true
+    end
+  end
+  return options
+end
+
+function PerkManager.MenuOpen(): boolean
+  local Equipment = Interface:FindFirstChild("Equipment")
+  local Categories = Equipment and Equipment:FindFirstChild("Categories")
+  local Perks = Categories and Categories:FindFirstChild("Equipment_Perks")
+  local Inner = Perks and Perks:FindFirstChild("Inner")
+  local Button = Inner and Inner:FindFirstChild("Interact")
+  local Viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+  local p = Button and Button.AbsolutePosition
+  return p ~= nil and Viewport ~= nil and p.Y > Viewport.Y * 0.03 and p.Y < Viewport.Y * 0.3
+end
+
+function PerkManager.Scan()
+  local Equipment = Interface:FindFirstChild("Equipment")
+  local Items = Equipment and Equipment:FindFirstChild("Items")
+  local Main = Items and Items:FindFirstChild("Main")
+  local Using = Main and Main:FindFirstChild("Using")
+  local Storage = Main and Main:FindFirstChild("Storage")
+  local Capacity = Items and Items:FindFirstChild("Capacity")
+  if not Using or not Storage or not Capacity then return nil end
+  local used, limit = string.match(Capacity.Text or "", "(%d+)%s*/%s*(%d+)")
+  if not used or not limit then return nil end
+  local cards = {}
+  for _, group in ipairs({ Using, Storage }) do
+    for _, card in ipairs(group:GetChildren()) do
+      local name = string.match(card.Name, "^%d+%s*%-%s*(.+)$")
+      local main = name and card:FindFirstChild("Main")
+      local button = main and main:FindFirstChild("Interact")
+      if button then
+        table.insert(cards, { Name = name, Key = PerkManager.Key(name),
+          Card = card, Button = button, Equipped = group == Using })
+      end
+    end
+  end
+  return cards, tonumber(used), tonumber(limit)
+end
+
+function PerkManager.Rank(card)
+  for index, name in ipairs(UserConfigs.PriorityPerks) do
+    if PerkManager.Key(name) == card.Key then return 100 + (7 - index) end
+  end
+  -- Unknown new perks are retained if equipped, but are not equipped over a known rarity.
+  return PerkManager.Rarity[card.Key] or (card.Equipped and 7 or -1)
+end
+
+function PerkManager.CloseInfo()
+  local viewport = Workspace.CurrentCamera.ViewportSize
+  mousemoveabs(math.floor(viewport.X * 0.78), math.floor(viewport.Y * 0.55))
+  mousemoverel(1, 0)
+  task.wait(0.2)
+  mouse1click()
+  task.wait(0.3)
+end
+
+function PerkManager.Change(card, equip: boolean): boolean
+  local desired = equip and "EQUIP" or "UNEQUIP"
+  local Equipment = Interface:FindFirstChild("Equipment")
+  local Info = Interface:FindFirstChild("Info")
+  local Prompt = Info and Info:FindFirstChild("Prompt")
+  local Main = Prompt and Prompt:FindFirstChild("Main")
+  local Buttons = Main and Main:FindFirstChild("Buttons")
+  local Change = Buttons and Buttons:FindFirstChild("Change")
+  local Label = Change and Change:FindFirstChild("Title")
+  local Title = Main and Main:FindFirstChild("Title")
+  if not Equipment or not Change or not Label or not Title then return false end
+
+  for attempt = 1, 2 do
+    if Stopped() or not isrbxactive() or not PerkManager.MenuOpen() then return false end
+    local before = PerkManager.Scan()
+    if before then
+      for _, current in ipairs(before) do
+        if current.Key == card.Key and current.Equipped == equip then return true end
+      end
+    end
+    PerkManager.CloseInfo()
+    CrateRoute.ClickButton(card.Button, 0.016, 0.026)
+    task.wait(0.45)
+    if PerkManager.Key(Title.Text) ~= card.Key or Label.Text ~= desired then
+      Boot("perk prompt mismatch for " .. card.Name .. ": " .. tostring(Title.Text) .. " / " .. tostring(Label.Text))
+      continue
+    end
+    CrateRoute.ClickButton(Change, 0.035, 0.018)
+    for _ = 1, 6 do
+      task.wait(0.25)
+      local cards = PerkManager.Scan()
+      if cards then
+        for _, current in ipairs(cards) do
+          if current.Key == card.Key and current.Equipped == equip then
+            PerkManager.CloseInfo()
+            Boot("perk " .. desired:lower() .. " confirmed: " .. card.Name)
+            return true
+          end
+        end
+      end
+    end
+  end
+  Boot("perk " .. desired:lower() .. " failed: " .. card.Name)
+  return false
+end
+
+function PerkManager.Handle(): boolean
+  if not UserConfigs.AutoPerks then return false end
+  if not UserConfigs.MenuDisabled and (not UI or not UI.ready) then return false end
+  if UserConfigs.AutoEquipmentUpgrades and CrateRoute.EquipmentPending then return false end
+  if UserConfigs.AutoStationUpgrades and CrateRoute.UpgradePending then return false end
+  if not PerkManager.Pending and os.clock() < PerkManager.NextCheck then return false end
+  if Qte.Active or IsTitanForm() or not isrbxactive() or not IsLocalAlive() then return false end
+  local Equipment = Interface:FindFirstChild("Equipment")
+  local Categories = Equipment and Equipment:FindFirstChild("Categories")
+  local Category = Categories and Categories:FindFirstChild("Equipment_Perks")
+  local Inner = Category and Category:FindFirstChild("Inner")
+  local TabButton = Inner and Inner:FindFirstChild("Interact")
+  local UpgradesCategory = Categories and Categories:FindFirstChild("Equipment_Upgrades")
+  local UpgradesInner = UpgradesCategory and UpgradesCategory:FindFirstChild("Inner")
+  local UpgradesTab = UpgradesInner and UpgradesInner:FindFirstChild("Interact")
+  local CloseFrame = Equipment and Equipment:FindFirstChild("Equipment_Close")
+  local Close = CloseFrame and CloseFrame:FindFirstChild("Interact")
+  local Waves = Workspace:FindFirstChild("Waves")
+  local NPCs = Waves and Waves:FindFirstChild("NPCs")
+  local Lulu = NPCs and NPCs:FindFirstChild("Lulu")
+  local NpcHrp = Lulu and Lulu:FindFirstChild("HumanoidRootPart")
+  local Hrp = GetPlayerHrp(LocalPlayer)
+  if not TabButton or not UpgradesTab or not Close or not NpcHrp or not Hrp then return false end
+
+  PerkManager.Pending, PerkManager.NextCheck = false, os.clock() + 120
+  CurrentTitanTarget = nil
+  FarmStats.Target, FarmStats.Status = "perks", "opening perks"
+  WhatShouldIBeDoing = "perks"
+  local wasVisible = UI and UI.window and UI.window.Visible
+  if wasVisible then
+    pcall(function() UI.window:Hide() end)
+    task.wait(0.12) -- let the Drawing window disappear before pressing central game buttons
+  end
+  if not PerkManager.MenuOpen() then
+    local at = NpcHrp.Position
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    Hrp.CFrame = CFrame.new(at.X + 4, at.Y, at.Z - 2)
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    task.wait(0.45)
+    for _ = 1, 12 do
+      if Stopped() or not UserConfigs.AutoPerks or not isrbxactive() or not IsLocalAlive() then break end
+      if PerkManager.MenuOpen() then break end
+      keypress(0x45)
+      task.wait(0.15)
+      keyrelease(0x45)
+      task.wait(0.4)
+    end
+  end
+  if PerkManager.MenuOpen() and not Stopped() and isrbxactive() then
+    task.wait(0.55) -- finish the Equipment slide-in before switching pages
+    if CrateRoute.EquipmentMenuOpen() then
+      CrateRoute.ClickButton(TabButton, 0.025, 0.04)
+      task.wait(0.45)
+    end
+    for _ = 1, 8 do
+      if Stopped() or not UserConfigs.AutoPerks or not isrbxactive() or not PerkManager.MenuOpen() then break end
+      local cards, used, limit = PerkManager.Scan()
+      if not cards or not limit or limit < 1 then break end
+      table.sort(cards, function(a, b)
+        local ar, br = PerkManager.Rank(a), PerkManager.Rank(b)
+        if ar ~= br then return ar > br end
+        if a.Equipped ~= b.Equipped then return a.Equipped end
+        return a.Key < b.Key
+      end)
+      local wanted = {}
+      for index = 1, math.min(limit, #cards) do wanted[cards[index].Key] = true end
+      local candidate, victim = nil, nil
+      for _, card in ipairs(cards) do
+        if not card.Equipped and wanted[card.Key] then candidate = card; break end
+      end
+      if not candidate then break end
+      if used >= limit then
+        for index = #cards, 1, -1 do
+          local card = cards[index]
+          if card.Equipped and not wanted[card.Key] then victim = card; break end
+        end
+        if not victim or not PerkManager.Change(victim, false) then break end
+      end
+      if not PerkManager.Change(candidate, true) then break end
+    end
+    PerkManager.CloseInfo()
+    if PerkManager.MenuOpen() and isrbxactive() then
+      CrateRoute.ClickButton(UpgradesTab, 0.025, 0.04)
+      task.wait(0.45)
+      if not CrateRoute.EquipmentMenuOpen() then Boot("perk manager could not restore Upgrades tab") end
+    end
+    for _ = 1, 3 do
+      if not PerkManager.MenuOpen() or not isrbxactive() then break end
+      CrateRoute.ClickButton(Close, 0.012, 0.021)
+      task.wait(0.45)
+    end
+    Boot("perk manager finished; menu " .. (PerkManager.MenuOpen() and "still open" or "closed"))
+  else
+    Boot("perk menu did not open")
+  end
+  if wasVisible and UI.window and not Stopped() then pcall(function() UI.window:Show() end) end
+  if not Stopped() then WhatShouldIBeDoing = "attack" end
+  return true
+end
 
 local function KillTitan(titan: Instance)
   DebugPrint("debug", 3, nil, "KillTitan", "Starting kill sequence for:", titan.Name)
@@ -2213,7 +2492,7 @@ task.spawn(function() -- The main loop, where the magic happens
     end
     Progress()
 
-    if not UserConfigs.Autofarm and not UserConfigs.AutoCrates then
+    if not UserConfigs.Autofarm and not UserConfigs.AutoCrates and not UserConfigs.AutoPerks then
       CurrentTitanTarget = nil
       FarmStats.Status = "paused"
       task.wait(0.5)
@@ -2251,6 +2530,10 @@ task.spawn(function() -- The main loop, where the magic happens
       continue
     end
     if CrateRoute.HandleUpgrade() then
+      task.wait(0.1)
+      continue
+    end
+    if PerkManager.Handle() then
       task.wait(0.1)
       continue
     end
@@ -2417,7 +2700,7 @@ RenderConn = game:GetService("RunService").RenderStepped:Connect(OnRenderStepped
 -- bob, reload spot). UE's own Settings tab has the menu key and configs. Our settings are
 -- saved to aotr_farm.json on every change and loaded at start.
 local UE_URL = "https://raw.githubusercontent.com/hauntedscripts/Scripts2/refs/heads/main/matcha%20ue"
-local UI = { lib = nil, window = nil, controls = {}, unloading = false }
+UI = { lib = nil, window = nil, controls = {}, unloading = false, ready = false }
 local KEYS = { farm = 0x75, unload = 0x23 } -- F6, End
 
 local function findUE()
@@ -2484,9 +2767,10 @@ end
 local function buildMenu()
   -- The menu redraws itself from Lua every 16ms; MenuDisabled skips it to test whether that load
   -- is what hangs Matcha mid-mission. Hotkeys and the status line keep working without it.
-  if UserConfigs.MenuDisabled then Boot("menu disabled (MenuDisabled in aotr_farm.json)"); return end
+  if UserConfigs.MenuDisabled then UI.ready = true; Boot("menu disabled (MenuDisabled in aotr_farm.json)"); return end
   local ue, err = loadUE()
   if not ue then
+    UI.ready = true
     Boot("menu failed: " .. tostring(err))
     warn("[Aotr] menu failed to load: " .. tostring(err) .. " (F6 / End hotkeys still work)")
     return
@@ -2570,6 +2854,42 @@ local function buildMenu()
   reg("TitanKillTimeout", shifting:AddSlider("TitanKillTimeout", { Text = "Titan Give Up After", Default = UserConfigs.TitanKillTimeout,
     Min = 5, Max = 60, Rounding = 0, Suffix = "s", Callback = setter("TitanKillTimeout") }))
 
+  local perksTab = win:AddTab("Perk Manager")
+  local priorityLeft = perksTab:AddLeftGroupbox("Priority Perks 1-3")
+  local priorityRight = perksTab:AddRightGroupbox("Priority Perks 4-6")
+  reg("AutoPerks", priorityLeft:AddToggle("AutoPerks", { Text = "Auto Manage Perks", Default = UserConfigs.AutoPerks,
+    Tooltip = "Equip priority perks first, then the highest-rarity perks in remaining slots",
+    Callback = function(value) UserConfigs.AutoPerks = value == true; PerkManager.Pending = true; SaveSettings() end }))
+  local selectors = {}
+  priorityLeft:AddInput("PerkSearch", { Text = "Search perk names", Default = "", Placeholder = "Type part of a perk name",
+    Callback = function(query)
+      for i, selector in ipairs(selectors) do
+        selector:SetValues(PerkManager.SearchOptions(tostring(query or ""), UserConfigs.PriorityPerks[i]))
+      end
+    end })
+  for i = 1, 6 do
+    local box = i <= 3 and priorityLeft or priorityRight
+    local selected = UserConfigs.PriorityPerks[i]
+    selectors[i] = reg("PriorityPerk" .. i, box:AddDropdown("PriorityPerk" .. i, {
+      Text = "Priority " .. i, Values = PerkManager.SearchOptions("", selected),
+      Default = selected ~= "" and selected or "None",
+      Tooltip = "Search above, then choose this slot. Earlier slots win when capacity is limited.",
+      Callback = function(value)
+        local name = value == "None" and "" or tostring(value or "")
+        if name ~= "" and not PerkManager.Rarity[PerkManager.Key(name)] then return end
+        UserConfigs.PriorityPerks[i] = name
+        for other = 1, 6 do
+          if other ~= i and name ~= "" and UserConfigs.PriorityPerks[other] == name then
+            UserConfigs.PriorityPerks[other] = ""
+            if selectors[other] then selectors[other]:SetValue("None") end
+          end
+        end
+        PerkManager.Pending = true
+        SaveSettings()
+      end }))
+  end
+  priorityRight:AddButton({ Text = "Manage perks now", Func = function() PerkManager.Pending = true; PerkManager.NextCheck = 0 end })
+
   local tuning = win:AddTab("Tuning")
   local attack = tuning:AddLeftGroupbox("Attack")
   reg("NapeSize", attack:AddSlider("NapeSize", { Text = "Nape Size", Default = UserConfigs.NapeSize,
@@ -2621,6 +2941,7 @@ local function buildMenu()
     win:Show()
     win._visibilityDirty = true
   end)
+  UI.ready = true
 
   -- UE redraws from its own task.spawn loop, but Matcha kills a thread at its first yield when
   -- its function comes from a chunk loadstring'd after the caller had already yielded (UE is
