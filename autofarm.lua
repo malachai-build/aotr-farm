@@ -105,6 +105,7 @@ local UserConfigs = {
   AutoRetry = true,       -- press Retry on the rewards screen
   AutoReload = true,      -- reload blades / refill gas when they run out
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
+  AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
   PullRadius = 5000,      -- studs from the target that Pull All Napes reaches; 5000 (the max) = whole map
@@ -136,7 +137,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
@@ -1760,7 +1761,8 @@ end
 
 -- Waves places a separate Crate_<player> model each round. The static map also has dozens of
 -- decorative Crates; only the player-specific model has a touch-enabled Hitbox.
-local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil }
+local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil,
+  EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0 }
 function CrateRoute.GetOwned(): Instance?
   if not UserConfigs.AutoCrates or TitanForm then return nil end
   local now = os.clock()
@@ -1820,7 +1822,98 @@ function CrateRoute.Handle(): boolean
       else Boot("crate dropoff touch attempted") end
       task.wait(0.65)
       Boot("crate after dropoff: " .. (Crate.Parent and "still present" or "removed"))
+      if not Crate.Parent then
+        CrateRoute.EquipmentPending = true
+        CrateRoute.EquipmentClicks = 0
+      end
     end
+  end
+  if not Stopped() then WhatShouldIBeDoing = "attack" end
+  return true
+end
+
+function CrateRoute.EquipmentMenuOpen(): boolean
+  local Equipment = Interface:FindFirstChild("Equipment")
+  local Stats = Equipment and Equipment:FindFirstChild("Stats")
+  local All = Stats and Stats:FindFirstChild("All")
+  local Position = All and All.AbsolutePosition
+  local Camera = Workspace.CurrentCamera
+  local Viewport = Camera and Camera.ViewportSize
+  return Position ~= nil and Viewport ~= nil and Position.X > Viewport.X * 0.02
+end
+
+function CrateRoute.ClickButton(Button: Instance, fallbackX: number, fallbackY: number)
+  local Position = Button.AbsolutePosition
+  local Size = Button.AbsoluteSize
+  local Viewport = Workspace.CurrentCamera.ViewportSize
+  local x = Position.X + (Size and Size.X > 1 and Size.X / 2 or Viewport.X * fallbackX)
+  local y = Position.Y + (Size and Size.Y > 1 and Size.Y / 2 or Viewport.Y * fallbackY)
+  mousemoveabs(math.floor(x), math.floor(y))
+  mousemoverel(1, 0) -- Matcha's absolute move alone does not trigger this game's GUI hover.
+  task.wait(0.18)
+  mouse1click()
+end
+
+function CrateRoute.HandleEquipment(): boolean
+  if not UserConfigs.AutoEquipmentUpgrades or not CrateRoute.EquipmentPending then return false end
+  if Qte.Active or IsTitanForm() or not isrbxactive() or os.clock() < CrateRoute.NextEquipmentAttempt then return false end
+  local Waves = Workspace:FindFirstChild("Waves")
+  local NPCs = Waves and Waves:FindFirstChild("NPCs")
+  local Lulu = NPCs and NPCs:FindFirstChild("Lulu")
+  local NpcHrp = Lulu and Lulu:FindFirstChild("HumanoidRootPart")
+  local Hrp = GetPlayerHrp(LocalPlayer)
+  local Equipment = Interface:FindFirstChild("Equipment")
+  local Stats = Equipment and Equipment:FindFirstChild("Stats")
+  local All = Stats and Stats:FindFirstChild("All")
+  local CloseFrame = Equipment and Equipment:FindFirstChild("Equipment_Close")
+  local Close = CloseFrame and CloseFrame:FindFirstChild("Interact")
+  if not NpcHrp or not Hrp or not All or not Close then return false end
+
+  CurrentTitanTarget = nil
+  FarmStats.Target = "equipment"
+  FarmStats.Status = "opening equipment"
+  WhatShouldIBeDoing = "equipment"
+  CrateRoute.NextEquipmentAttempt = os.clock() + 5
+  if not CrateRoute.EquipmentMenuOpen() then
+    local at = NpcHrp.Position
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    Hrp.CFrame = CFrame.new(at.X + 4, at.Y, at.Z - 2)
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    task.wait(0.45)
+    for _ = 1, 12 do
+      if Stopped() or not UserConfigs.Autofarm or not isrbxactive() or not IsLocalAlive() then break end
+      if CrateRoute.EquipmentMenuOpen() then break end
+      keypress(0x45)
+      task.wait(0.15)
+      keyrelease(0x45)
+      task.wait(0.4)
+    end
+  end
+
+  if CrateRoute.EquipmentMenuOpen() and not Stopped() then
+    FarmStats.Status = "buying equipment upgrades"
+    while CrateRoute.EquipmentClicks < 5 and not Stopped() and UserConfigs.Autofarm and isrbxactive() and CrateRoute.EquipmentMenuOpen() do
+      CrateRoute.ClickButton(All, 0.063, 0.019)
+      CrateRoute.EquipmentClicks += 1
+      Boot("equipment Upgrade All click " .. CrateRoute.EquipmentClicks .. "/5")
+      task.wait(0.55)
+    end
+    if CrateRoute.EquipmentClicks == 5 and isrbxactive() then
+      FarmStats.Status = "closing equipment"
+      for attempt = 1, 3 do
+        if Stopped() or not CrateRoute.EquipmentMenuOpen() then break end
+        CrateRoute.ClickButton(Close, 0.012, 0.021)
+        task.wait(0.45)
+      end
+      if not CrateRoute.EquipmentMenuOpen() then
+        CrateRoute.EquipmentPending = false
+        Boot("equipment upgrades finished; menu closed")
+      else
+        Boot("equipment X click did not close menu")
+      end
+    end
+  else
+    Boot("equipment menu did not open")
   end
   if not Stopped() then WhatShouldIBeDoing = "attack" end
   return true
@@ -2047,6 +2140,10 @@ task.spawn(function() -- The main loop, where the magic happens
     end
 
     if CrateRoute.Handle() then
+      task.wait(0.1)
+      continue
+    end
+    if CrateRoute.HandleEquipment() then
       task.wait(0.1)
       continue
     end
@@ -2314,6 +2411,9 @@ local function buildMenu()
   reg("AutoCrates", farm:AddToggle("AutoCrates", { Text = "Auto Crate Delivery", Default = UserConfigs.AutoCrates,
     Tooltip = "Touch your spawned Waves crate, then the drop-off cart",
     Callback = setter("AutoCrates") }))
+  reg("AutoEquipmentUpgrades", farm:AddToggle("AutoEquipmentUpgrades", { Text = "Auto Equipment Upgrades", Default = UserConfigs.AutoEquipmentUpgrades,
+    Tooltip = "After crate delivery, visit Lulu and click Upgrade All five times",
+    Callback = setter("AutoEquipmentUpgrades") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
     Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
   reg("NoKillMinutes", farm:AddSlider("NoKillMinutes", { Text = "Reset After No Kill", Default = UserConfigs.NoKillMinutes,
