@@ -376,20 +376,10 @@ type UiCacheType = {
   RewardsFrame: GuiObject?
 }
 
-type BladeCacheType = {
-  RightBlade: Instance?,
-  LeftBlade: Instance?,
-  RightHand: Instance?,
-  LeftHand: Instance?
-}
-
-
-
 local TitansCache: { [number]: TitanEntry } = {}
 local KnownTitans: { [number]: Instance } = {} -- Childrens of the titans folder
 local CharacterCache: { [number]: CharacterCacheType } = {}
 local UiCache: UiCacheType = {}
-local BladeCache: BladeCacheType = {}
 
 
 local GasTankModel: Instance? = nil
@@ -1106,43 +1096,30 @@ local function AreBladesFullyBroken(): boolean
   if os.clock() - LastBladeCheck < 0.5 then return CachedBladesBroken end
 
   LastBladeCheck = os.clock()
+  -- Each hand has seven segments. A hidden Blade_1 is only partial wear; reload when
+  -- every segment on both hands is hidden. Resolve the current rig after each swap.
 
-  local RightBlade = BladeCache.RightBlade :: Instance
-  local LeftBlade = BladeCache.LeftBlade :: Instance
-
-  if not RightBlade or not RightBlade.Parent or not LeftBlade or not LeftBlade.Parent then
-    local LocalPlayerCharacterCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCharacterCache then return false end
-
-    local Character = LocalPlayerCharacterCache.Character or GetPlayerCharacter(LocalPlayer); if not Character then return false end
-    local Rig_ = Character:FindFirstChild("Rig_" .. LocalPlayer.Name); if not Rig_ then return false end
-
-    local RightHand = BladeCache.RightHand :: Instance
-    local LeftHand = BladeCache.LeftHand :: Instance
-
-    if not RightHand or not LeftHand then
-      RightHand = Rig_:FindFirstChild("RightHand")
-      LeftHand = Rig_:FindFirstChild("LeftHand")
-
-      if not RightHand or not LeftHand then return false end
-
-      BladeCache.RightHand = RightHand
-      BladeCache.LeftHand = LeftHand
-    end
-
-    RightBlade = RightHand:FindFirstChild("Blade_1")
-    LeftBlade = LeftHand:FindFirstChild("Blade_1")
-
-    if not RightBlade or not LeftBlade then return false end
-
-    BladeCache.RightBlade = RightBlade
-    BladeCache.LeftBlade = LeftBlade
-  end
+  local Character = GetPlayerCharacter(LocalPlayer); if not Character then return false end
+  local Rig = Character:FindFirstChild("Rig_" .. LocalPlayer.Name); if not Rig then return false end
+  local RightHand = Rig:FindFirstChild("RightHand")
+  local LeftHand = Rig:FindFirstChild("LeftHand")
+  if not RightHand or not LeftHand then return false end
 
   local ok, AreBroken = pcall(function()
-    local RightTransparency = memory_read("float", RightBlade.Address :: number + TransparencyBasePartOffset)
-    local LeftTransparency = memory_read("float", LeftBlade.Address :: number + TransparencyBasePartOffset)
-
-    return RightTransparency >= 0.9 and LeftTransparency >= 0.9
+    local FoundRight, FoundLeft = 0, 0
+    for index = 1, 7 do
+      local RightBlade = RightHand:FindFirstChild("Blade_" .. index)
+      local LeftBlade = LeftHand:FindFirstChild("Blade_" .. index)
+      if RightBlade then
+        FoundRight += 1
+        if memory_read("float", RightBlade.Address + TransparencyBasePartOffset) < 0.9 then return false end
+      end
+      if LeftBlade then
+        FoundLeft += 1
+        if memory_read("float", LeftBlade.Address + TransparencyBasePartOffset) < 0.9 then return false end
+      end
+    end
+    return FoundRight > 0 and FoundLeft > 0
   end)
 
   if not ok then
@@ -1346,9 +1323,7 @@ local function HandleAllReloads()
 
       DebugPrint("debug", 0, nil, nil, "Proceeding to reload blades.")
 
-      Tr.step("reload", "tp to sky (write)")
-      Hrp.CFrame = SafePosNow()
-
+      -- The hover keeps us over the current titan while the blades are reloaded.
       Tr.step("reload", "press R")
       keypress(0x52)
       task.wait(0.5)
@@ -1769,6 +1744,7 @@ local function KillTitan(titan: Instance)
   FarmStats.Target = titan.Name:sub(1, 8)
   FarmStats.Status = "attacking"
   local LastSlashAt = -math.huge
+  local BladesBroke = false
   while true do
     Progress()
     Tr.step("main", "kill checks")
@@ -1780,7 +1756,11 @@ local function KillTitan(titan: Instance)
     end
     if not IsLocalAlive() then print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
     local Shifted = IsTitanForm()
-    if not Shifted and AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
+    if not Shifted and AreBladesFullyBroken() then
+      BladesBroke = true
+      DebugPrint("debug", 3, nil, "KillTitan", "Blades broken")
+      break
+    end
     -- No per-titan kill timeout (removed at the user's request, 2026-11-03): the farm stays on a
     -- target until it dies. KillTimeout/TitanKillTimeout are no longer read. A titan that never
     -- dies is still caught by NoKillMinutes in the main loop, which resets the run.
@@ -1855,9 +1835,11 @@ local function KillTitan(titan: Instance)
       end
     end
   end
-  -- Drop the target so the hover stops following a dead or abandoned titan.
-  CurrentTitanTarget = nil
-  FarmStats.Target = "none"
+  -- Keep hovering over the target while blade-only reload runs.
+  if not BladesBroke or not UserConfigs.AutoReload then
+    CurrentTitanTarget = nil
+    FarmStats.Target = "none"
+  end
   DebugPrint("debug", 3, nil, "KillTitan", "Kill sequence ended for: ", titan.Name)
 end
 
@@ -1978,12 +1960,13 @@ task.spawn(function() -- The main loop, where the magic happens
 
     Tr.step("main", "blade check")
     if not IsTitanForm() and AreBladesFullyBroken() then
-      CurrentTitanTarget = nil
       if UserConfigs.AutoReload then
+        CurrentTitanTarget = GetNearestTitan()
         FarmStats.Status = "reloading"
         Tr.step("main", "reload")
         HandleAllReloads()
       else
+        CurrentTitanTarget = nil
         FarmStats.Status = "blades broken (auto reload off)"
       end
       task.wait(1)
