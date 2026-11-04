@@ -1091,8 +1091,8 @@ local function GetUiCached(cacheKey: string, parent: Instance, ...)
 end
 
 
-local function AreBladesFullyBroken(): boolean
-  if os.clock() - LastBladeCheck < 0.5 then return CachedBladesBroken end
+local function AreBladesFullyBroken(forceFresh: boolean?): boolean
+  if not forceFresh and os.clock() - LastBladeCheck < 0.5 then return CachedBladesBroken end
 
   LastBladeCheck = os.clock()
   -- Each hand has seven segments. A hidden Blade_1 is only partial wear; reload when
@@ -1131,19 +1131,21 @@ local function AreBladesFullyBroken(): boolean
 end
 
 
-local function DoINeedToRefill(): boolean -- The 0 / 3 counter
+local function DoINeedToRefill(): boolean -- 0 / 3 is the reserve count; the current set may still be full
 
-  local Blades = GetUiCached("Blades", DownMiddlePartUi, "Blades"); if not Blades then return true end
-  local TextForBlades = GetUiCached("TextForBlades", Blades, "Sets") :: TextLabel?; if not TextForBlades then return true end
+  local Blades = GetUiCached("Blades", DownMiddlePartUi, "Blades"); if not Blades then return false end
+  local TextForBlades = GetUiCached("TextForBlades", Blades, "Sets") :: TextLabel?; if not TextForBlades then return false end
 
-  local Gas = GetUiCached("Gas", DownMiddlePartUi, "Gas"); if not Gas then return true end
-  local TextForGas = GetUiCached("TextForGas", Gas, "Percentage") :: TextLabel?; if not TextForGas then return true end
+  local Gas = GetUiCached("Gas", DownMiddlePartUi, "Gas"); if not Gas then return false end
+  local TextForGas = GetUiCached("TextForGas", Gas, "Percentage") :: TextLabel?; if not TextForGas then return false end
 
-  local BladesValue = tonumber(TextForBlades.Text:match("%d+")) or 0
-  local GasValue = tonumber(TextForGas.Text:match("%d+")) or 0
+  local BladesValue = tonumber(TextForBlades.Text:match("%d+"))
+  local GasValue = tonumber(TextForGas.Text:match("%d+"))
+  if not BladesValue or not GasValue then return false end
 
 
-  local NeedRefill = BladesValue == 0 or GasValue == 0
+  -- At 0/3 the last set can still be in hand; use it until every segment is spent.
+  local NeedRefill = GasValue == 0 or (BladesValue == 0 and AreBladesFullyBroken(true))
 
   if NeedRefill then
     WhatShouldIBeDoing = "refill"
@@ -1222,7 +1224,7 @@ end
 
 local function HandleAllReloads()
   if TitanForm then return end -- a titan has no blades or gas; the HUD reads empty and the refill never ends
-  if not AreBladesFullyBroken() then return end
+  if not AreBladesFullyBroken(true) then return end
 
   local LocalPlayerCharacterCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCharacterCache then return end
   local Hrp = LocalPlayerCharacterCache.Hrp or GetPlayerHrp(LocalPlayer); if not Hrp then return end
@@ -1325,6 +1327,9 @@ local function HandleAllReloads()
       keypress(0x52)
       task.wait(0.5)
       keyrelease(0x52)
+      task.wait(0.1) -- let the new blade set appear before another broken-blade check
+      LastBladeCheck = 0
+      CachedBladesBroken = false
       Tr.step("reload", "done")
 
       ReloadingBlades = false
