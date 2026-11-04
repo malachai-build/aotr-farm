@@ -106,7 +106,6 @@ local UserConfigs = {
   AutoReload = true,      -- reload blades / refill gas when they run out
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
-  PullBossLimbs = false,  -- also pull every raid boss hitbox limb onto the player
   PullRadius = 5000,      -- studs from the target that Pull All Napes reaches; 5000 (the max) = whole map
   PullCount = 6,          -- napes stacked per slash, target included; blade hits cap at ~6 titans
   MenuDisabled = false,   -- skip the menu (edit aotr_farm.json); F6/End and the status line still work
@@ -129,14 +128,14 @@ local UserConfigs = {
   TitanRetreatHp = 0.35,  -- fraction of titan health below which the titan form backs off to the hover
   TitanReturnHp = 0.8,    -- fraction it must heal back to before striking again
   TitanKillTimeout = 25,  -- seconds before giving up on a titan while shifted
-  NoKillMinutes = 5,      -- minutes without a kill before pausing the farm
+  NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
   BossNoKillMinutes = 20, -- the same while a raid boss is alive (bosses never time out)
   AutoQTE = true,         -- press the key a raid quick time event asks for
   DebugMode = _G.KittyDebug == true -- was `or true`, which forced it on
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
@@ -893,7 +892,9 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
     local NapeParent = Nape.Parent
     return NapeParent ~= nil and NapeParent.Name == "Hit"
   end
-  local function PlacePart(titan: Instance, Nape: BasePart)
+  local function Place(titan: Instance)
+    Tr.step("main", "pull: find nape")
+    local Nape = GetTitanWeakSpot(titan); if not Nape then return end
     Tr.step("main", "pull: live check")
     if not Writable(titan, Nape) then SkippedNapes += 1; return end
     -- Read per nape: the player may move between writes.
@@ -913,21 +914,6 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
       HeavyWrites += 1
       if not SizedNapes[Key] then SizedNapesCount += 1 end
       SizedNapes[Key] = Size
-    end
-  end
-  local function Place(titan: Instance)
-    Tr.step("main", "pull: find weak spot")
-    local WeakSpot = GetTitanWeakSpot(titan); if not WeakSpot then return end
-    PlacePart(titan, WeakSpot)
-    if not UserConfigs.PullBossLimbs or not IsBossTitan(titan) then return end
-    local Hitboxes = titan:FindFirstChild("Hitboxes")
-    local Hit = Hitboxes and Hitboxes:FindFirstChild("Hit")
-    if not Hit then return end
-    local Parts = Hit:GetChildren()
-    for i = 1, #Parts do
-      if Stopped() or not IsValid(PlayerHrp) then break end
-      local Part = Parts[i]
-      if Part.Address ~= WeakSpot.Address and Part:IsA("BasePart") then PlacePart(titan, Part) end
     end
   end
   Place(target)
@@ -1920,8 +1906,9 @@ task.spawn(function() -- The main loop, where the magic happens
   while not Stopped() do
     Tr.step("main", "loop top")
     FindQteUi()
-    -- A stuck mission keeps a fresh heartbeat, so pause after NoKillMinutes without a kill.
-    -- A raid boss takes minutes to kill, so its limit is BossNoKillMinutes.
+    -- A stuck mission keeps a fresh heartbeat (5 hours on 2026-11-02), so after NoKillMinutes
+    -- without a kill the character feeds itself to a titan and the run resets. A raid boss takes
+    -- minutes to kill, so while one is alive the limit is BossNoKillMinutes.
     local Idle = FarmStats.Status == "paused" or FarmStats.Status == "pressing retry" or FarmStats.Status == "dead, waiting to respawn"
     if FarmStats.Kills ~= LastKills or Idle then
       LastKills, LastKillAt = FarmStats.Kills, os.clock()
@@ -2226,9 +2213,11 @@ local function buildMenu()
     Callback = setter("AutoReload") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
     Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
-  reg("NoKillMinutes", farm:AddSlider("NoKillMinutes", { Text = "Pause After No Kill", Default = UserConfigs.NoKillMinutes,
-    Min = 2, Max = 30, Rounding = 0, Suffix = " min", Tooltip = "Pause the farm when it stops getting kills",
+  reg("NoKillMinutes", farm:AddSlider("NoKillMinutes", { Text = "Reset After No Kill", Default = UserConfigs.NoKillMinutes,
+    Min = 2, Max = 30, Rounding = 0, Suffix = " min", Tooltip = "Feed a titan to restart a stuck run",
     Callback = setter("NoKillMinutes") }))
+  reg("BossNoKillMinutes", farm:AddSlider("BossNoKillMinutes", { Text = "Reset After (Raid Boss)", Default = UserConfigs.BossNoKillMinutes,
+    Min = 5, Max = 60, Rounding = 0, Suffix = " min", Callback = setter("BossNoKillMinutes") }))
   reg("DebugMode", farm:AddToggle("DebugMode", { Text = "Debug Logging", Default = UserConfigs.DebugMode,
     Tooltip = "Verbose log lines (file logging only starts if this was on at launch)",
     Callback = setter("DebugMode") }))
@@ -2240,13 +2229,6 @@ local function buildMenu()
   end })
   session:AddButton({ Text = "Reset kill stats", Func = function() FarmStats.Kills, FarmStats.Timeouts = 0, 0 end })
   session:AddButton({ Text = "Unload (End)", Func = Unload })
-
-  local boss = main:AddRightGroupbox("Raid Boss")
-  reg("PullBossLimbs", boss:AddToggle("PullBossLimbs", { Text = "Pull All Limbs", Default = UserConfigs.PullBossLimbs,
-    Tooltip = "Stack all raid boss hitbox limbs for each slash; extra damage is unverified",
-    Callback = setter("PullBossLimbs") }))
-  reg("BossNoKillMinutes", boss:AddSlider("BossNoKillMinutes", { Text = "Pause After No Kill", Default = UserConfigs.BossNoKillMinutes,
-    Min = 5, Max = 60, Rounding = 0, Suffix = " min", Callback = setter("BossNoKillMinutes") }))
 
   local shifting = main:AddLeftGroupbox("Titan Shifting")
   reg("ShiftEnabled", shifting:AddToggle("ShiftEnabled", { Text = "Auto Shift", Default = UserConfigs.ShiftEnabled,
