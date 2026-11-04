@@ -106,7 +106,7 @@ local UserConfigs = {
   AutoReload = true,      -- reload blades / refill gas when they run out
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
-  AutoStationUpgrades = true, -- after equipment, buy HQ Max HP and Regen once each
+  AutoStationUpgrades = true, -- after equipment, buy HQ Max HP and Regen twice; Refills on even waves
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
   PullRadius = 5000,      -- studs from the target that Pull All Napes reaches; 5000 (the max) = whole map
@@ -1764,7 +1764,15 @@ end
 -- decorative Crates; only the player-specific model has a touch-enabled Hitbox.
 local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil,
   EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0,
-  UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0 }
+  UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0, RoundNumber = nil }
+function CrateRoute.ReadRound(): number?
+  local Hud = Interface:FindFirstChild("HUD")
+  local Objectives = Hud and Hud:FindFirstChild("Objectives")
+  local Main = Objectives and Objectives:FindFirstChild("Main")
+  local Clearance = Main and Main:FindFirstChild("Clearance")
+  local Cleared = Clearance and string.match(Clearance.Text or "", "Waves Cleared%s*%[(%d+)%s*/")
+  return Cleared and tonumber(Cleared) + 1 or nil
+end
 function CrateRoute.GetOwned(): Instance?
   if not UserConfigs.AutoCrates or TitanForm then return nil end
   local now = os.clock()
@@ -1812,7 +1820,7 @@ function CrateRoute.Handle(): boolean
   if ok then
     Boot("crate pickup touch attempted")
     task.wait(0.65)
-    if not Stopped() and UserConfigs.Autofarm and IsLocalAlive() then
+    if not Stopped() and UserConfigs.AutoCrates and IsLocalAlive() then
       FarmStats.Status = "delivering crate"
       local delivered, dropErr = pcall(function()
         local at = Cart.Position
@@ -1825,6 +1833,8 @@ function CrateRoute.Handle(): boolean
       task.wait(0.65)
       Boot("crate after dropoff: " .. (Crate.Parent and "still present" or "removed"))
       if not Crate.Parent then
+        CrateRoute.RoundNumber = CrateRoute.ReadRound()
+        Boot("crate delivered on wave " .. tostring(CrateRoute.RoundNumber or "unknown"))
         CrateRoute.EquipmentPending = true
         CrateRoute.EquipmentClicks = 0
         CrateRoute.UpgradePending = true
@@ -1885,7 +1895,7 @@ function CrateRoute.HandleEquipment(): boolean
     Hrp.AssemblyLinearVelocity = Vector3Zero
     task.wait(0.45)
     for _ = 1, 12 do
-      if Stopped() or not UserConfigs.Autofarm or not isrbxactive() or not IsLocalAlive() then break end
+      if Stopped() or not UserConfigs.AutoCrates or not isrbxactive() or not IsLocalAlive() then break end
       if CrateRoute.EquipmentMenuOpen() then break end
       keypress(0x45)
       task.wait(0.15)
@@ -1896,7 +1906,7 @@ function CrateRoute.HandleEquipment(): boolean
 
   if CrateRoute.EquipmentMenuOpen() and not Stopped() then
     FarmStats.Status = "buying equipment upgrades"
-    while CrateRoute.EquipmentClicks < 5 and not Stopped() and UserConfigs.Autofarm and isrbxactive() and CrateRoute.EquipmentMenuOpen() do
+    while CrateRoute.EquipmentClicks < 5 and not Stopped() and UserConfigs.AutoCrates and isrbxactive() and CrateRoute.EquipmentMenuOpen() do
       CrateRoute.ClickButton(All, 0.063, 0.019)
       CrateRoute.EquipmentClicks += 1
       Boot("equipment Upgrade All click " .. CrateRoute.EquipmentClicks .. "/5")
@@ -1949,11 +1959,13 @@ function CrateRoute.HandleUpgrade(): boolean
   local Upgrades = Main and Main:FindFirstChild("Upgrades")
   local Max = Upgrades and Upgrades:FindFirstChild("Max")
   local Regen = Upgrades and Upgrades:FindFirstChild("Regen")
+  local Refills = Upgrades and Upgrades:FindFirstChild("Refills")
   local MaxBuy = Max and Max:FindFirstChild("Max_Use")
   local RegenBuy = Regen and Regen:FindFirstChild("Regen_Use")
+  local RefillsBuy = Refills and Refills:FindFirstChild("Refills_Use")
   local CloseFrame = Upgrade and Upgrade:FindFirstChild("Upgrade_Close")
   local Close = CloseFrame and CloseFrame:FindFirstChild("Interact")
-  if not NpcHrp or not Hrp or not MaxBuy or not RegenBuy or not Close then return false end
+  if not NpcHrp or not Hrp or not MaxBuy or not RegenBuy or not RefillsBuy or not Close then return false end
 
   CurrentTitanTarget = nil
   FarmStats.Target = "HQ upgrades"
@@ -1967,7 +1979,7 @@ function CrateRoute.HandleUpgrade(): boolean
     Hrp.AssemblyLinearVelocity = Vector3Zero
     task.wait(0.45)
     for _ = 1, 12 do
-      if Stopped() or not UserConfigs.Autofarm or not isrbxactive() or not IsLocalAlive() then break end
+      if Stopped() or not UserConfigs.AutoCrates or not isrbxactive() or not IsLocalAlive() then break end
       if CrateRoute.UpgradeMenuOpen() then break end
       keypress(0x45)
       task.wait(0.15)
@@ -1978,17 +1990,18 @@ function CrateRoute.HandleUpgrade(): boolean
 
   if CrateRoute.UpgradeMenuOpen() and not Stopped() then
     FarmStats.Status = "buying HQ upgrades"
-    for _, Button in ipairs({ MaxBuy, RegenBuy }) do
-      if CrateRoute.UpgradeClicks >= 2 then break end
-      if CrateRoute.UpgradeClicks == 0 or Button == RegenBuy then
-        if Stopped() or not UserConfigs.Autofarm or not isrbxactive() or not CrateRoute.UpgradeMenuOpen() then break end
-        CrateRoute.ClickButton(Button, 0.043, 0.016)
-        CrateRoute.UpgradeClicks += 1
-        Boot("HQ " .. (CrateRoute.UpgradeClicks == 1 and "Max HP" or "Regen") .. " click")
-        task.wait(0.55)
-      end
+    CrateRoute.RoundNumber = CrateRoute.RoundNumber or CrateRoute.ReadRound()
+    local TargetClicks = CrateRoute.RoundNumber and CrateRoute.RoundNumber % 2 == 0 and 5 or 4
+    while CrateRoute.UpgradeClicks < TargetClicks do
+      if Stopped() or not UserConfigs.AutoCrates or not isrbxactive() or not CrateRoute.UpgradeMenuOpen() then break end
+      local index = CrateRoute.UpgradeClicks + 1
+      local Button = index <= 2 and MaxBuy or index <= 4 and RegenBuy or RefillsBuy
+      CrateRoute.ClickButton(Button, 0.043, 0.016)
+      CrateRoute.UpgradeClicks = index
+      Boot("HQ " .. (index <= 2 and "Max HP" or index <= 4 and "Regen" or "Refills") .. " click " .. index .. "/" .. TargetClicks)
+      task.wait(0.55)
     end
-    if CrateRoute.UpgradeClicks == 2 and isrbxactive() then
+    if CrateRoute.UpgradeClicks == TargetClicks and isrbxactive() then
       FarmStats.Status = "closing HQ upgrades"
       for _ = 1, 3 do
         if Stopped() or not CrateRoute.UpgradeMenuOpen() then break end
@@ -2187,7 +2200,7 @@ task.spawn(function() -- The main loop, where the magic happens
     -- A stuck mission keeps a fresh heartbeat (5 hours on 2026-11-02), so after NoKillMinutes
     -- without a kill the character feeds itself to a titan and the run resets. A raid boss takes
     -- minutes to kill, so while one is alive the limit is BossNoKillMinutes.
-    local Idle = FarmStats.Status == "paused" or FarmStats.Status == "pressing retry" or FarmStats.Status == "dead, waiting to respawn"
+    local Idle = not UserConfigs.Autofarm or FarmStats.Status == "paused" or FarmStats.Status == "pressing retry" or FarmStats.Status == "dead, waiting to respawn"
     if FarmStats.Kills ~= LastKills or Idle then
       LastKills, LastKillAt = FarmStats.Kills, os.clock()
     else
@@ -2200,7 +2213,7 @@ task.spawn(function() -- The main loop, where the magic happens
     end
     Progress()
 
-    if not UserConfigs.Autofarm then
+    if not UserConfigs.Autofarm and not UserConfigs.AutoCrates then
       CurrentTitanTarget = nil
       FarmStats.Status = "paused"
       task.wait(0.5)
@@ -2239,6 +2252,13 @@ task.spawn(function() -- The main loop, where the magic happens
     end
     if CrateRoute.HandleUpgrade() then
       task.wait(0.1)
+      continue
+    end
+
+    if not UserConfigs.Autofarm then
+      CurrentTitanTarget = nil
+      FarmStats.Status = "Waves tasks idle (titan farm off)"
+      task.wait(0.5)
       continue
     end
 
@@ -2509,7 +2529,7 @@ local function buildMenu()
     Tooltip = "After crate delivery, visit Lulu and click Upgrade All five times",
     Callback = setter("AutoEquipmentUpgrades") }))
   reg("AutoStationUpgrades", farm:AddToggle("AutoStationUpgrades", { Text = "Auto HQ Upgrades", Default = UserConfigs.AutoStationUpgrades,
-    Tooltip = "After crate delivery and equipment, buy Max HP and Regen at Cole's station",
+    Tooltip = "After crate delivery and equipment, click Max HP twice and Regen twice; Refills on even waves",
     Callback = setter("AutoStationUpgrades") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
     Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
