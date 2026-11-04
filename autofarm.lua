@@ -106,8 +106,9 @@ local UserConfigs = {
   AutoReload = true,      -- reload blades / refill gas when they run out
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
-  AutoStationUpgrades = true, -- after equipment, buy HQ Max HP and Regen twice; Refills on even waves
+  AutoStationUpgrades = true, -- after equipment, buy HQ Max HP twice, Regen up to five total, Refills on even waves
   AutoPerks = true,       -- choose the strongest owned perks after Waves tasks
+  AutoMarket = true,      -- buy missing priority perks from Orange before upgrades
   PriorityPerks = { "", "", "", "", "", "" },
   NapeSize = 15,          -- studs; the pulled nape is resized to this cube
   PullAllNapes = false,   -- stack every live titan's nape on the target's, not just the target's
@@ -140,7 +141,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "PriorityPerks", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
@@ -1780,7 +1781,50 @@ end
 local PerkManager
 local CrateRoute = { Cached = nil, NextCheck = 0, LastAttemptAt = -math.huge, LastAttemptAddress = nil,
   EquipmentPending = false, EquipmentClicks = 0, NextEquipmentAttempt = 0,
-  UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0, RoundNumber = nil }
+  UpgradePending = false, UpgradeClicks = 0, NextUpgradeAttempt = 0,
+  MarketPending = false, RoundNumber = nil, RegenPlanned = 0, RefillsPlanned = 0 }
+local WAVE_STATE_FILE = "aotr/waves_purchases.json"
+local WaveState = { JobId = game.JobId, Wave = "", RegenTotal = 0,
+  EquipmentClicks = 0, HQClicks = 0, RegenPlanned = 0, RefillsPlanned = 0, MarketAttempts = {} }
+pcall(function()
+  if type(isfile) == "function" and not isfile(WAVE_STATE_FILE) then return end
+  local saved = HttpService:JSONDecode(readfile(WAVE_STATE_FILE))
+  if type(saved) == "table" and saved.JobId == game.JobId then
+    WaveState = saved
+    WaveState.Wave = type(saved.Wave) == "string" and saved.Wave or ""
+    WaveState.RegenTotal = math.clamp(tonumber(saved.RegenTotal) or 0, 0, 5)
+    WaveState.EquipmentClicks = math.clamp(tonumber(saved.EquipmentClicks) or 0, 0, 5)
+    WaveState.HQClicks = math.clamp(tonumber(saved.HQClicks) or 0, 0, 5)
+    WaveState.RegenPlanned = math.clamp(tonumber(saved.RegenPlanned) or 0, 0, 2)
+    WaveState.RefillsPlanned = math.clamp(tonumber(saved.RefillsPlanned) or 0, 0, 1)
+    WaveState.MarketAttempts = type(saved.MarketAttempts) == "table" and saved.MarketAttempts or {}
+  end
+end)
+function CrateRoute.SaveWaveState()
+  pcall(writefile, WAVE_STATE_FILE, HttpService:JSONEncode(WaveState))
+end
+function CrateRoute.BeginWave(round: number?, crate: Instance)
+  local wave = round and tostring(round) or "crate:" .. tostring(crate.Address)
+  CrateRoute.RoundNumber = round
+  if WaveState.Wave ~= wave then
+    WaveState.Wave = wave
+    WaveState.EquipmentClicks = 0
+    WaveState.HQClicks = 0
+    WaveState.RegenPlanned = math.min(2, 5 - WaveState.RegenTotal)
+    WaveState.RefillsPlanned = round and round % 2 == 0 and 1 or 0
+    WaveState.MarketAttempts = {}
+    CrateRoute.MarketPending = true
+    PerkManager.Pending = true
+    PerkManager.SurveyPending = true
+    CrateRoute.SaveWaveState()
+  end
+  CrateRoute.EquipmentClicks = WaveState.EquipmentClicks
+  CrateRoute.UpgradeClicks = WaveState.HQClicks
+  CrateRoute.RegenPlanned = WaveState.RegenPlanned
+  CrateRoute.RefillsPlanned = WaveState.RefillsPlanned
+  CrateRoute.EquipmentPending = CrateRoute.EquipmentClicks < 5
+  CrateRoute.UpgradePending = CrateRoute.UpgradeClicks < 2 + CrateRoute.RegenPlanned + CrateRoute.RefillsPlanned
+end
 function CrateRoute.ReadRound(): number?
   local Hud = Interface:FindFirstChild("HUD")
   local Objectives = Hud and Hud:FindFirstChild("Objectives")
@@ -1849,13 +1893,8 @@ function CrateRoute.Handle(): boolean
       task.wait(0.65)
       Boot("crate after dropoff: " .. (Crate.Parent and "still present" or "removed"))
       if not Crate.Parent then
-        CrateRoute.RoundNumber = CrateRoute.ReadRound()
+        CrateRoute.BeginWave(CrateRoute.ReadRound(), Crate)
         Boot("crate delivered on wave " .. tostring(CrateRoute.RoundNumber or "unknown"))
-        CrateRoute.EquipmentPending = true
-        CrateRoute.EquipmentClicks = 0
-        CrateRoute.UpgradePending = true
-        CrateRoute.UpgradeClicks = 0
-        PerkManager.Pending = true
       end
     end
   end
@@ -1948,8 +1987,10 @@ function CrateRoute.HandleEquipment(): boolean
   if CrateRoute.EquipmentMenuOpen() and not Stopped() then
     FarmStats.Status = "buying equipment upgrades"
     while CrateRoute.EquipmentClicks < 5 and not Stopped() and UserConfigs.AutoCrates and isrbxactive() and CrateRoute.EquipmentMenuOpen() do
-      CrateRoute.ClickButton(All, 0.063, 0.019)
       CrateRoute.EquipmentClicks += 1
+      WaveState.EquipmentClicks = CrateRoute.EquipmentClicks
+      CrateRoute.SaveWaveState()
+      CrateRoute.ClickButton(All, 0.063, 0.019)
       Boot("equipment Upgrade All click " .. CrateRoute.EquipmentClicks .. "/5")
       task.wait(0.55)
     end
@@ -2031,15 +2072,18 @@ function CrateRoute.HandleUpgrade(): boolean
 
   if CrateRoute.UpgradeMenuOpen() and not Stopped() then
     FarmStats.Status = "buying HQ upgrades"
-    CrateRoute.RoundNumber = CrateRoute.RoundNumber or CrateRoute.ReadRound()
-    local TargetClicks = CrateRoute.RoundNumber and CrateRoute.RoundNumber % 2 == 0 and 5 or 4
+    local TargetClicks = 2 + CrateRoute.RegenPlanned + CrateRoute.RefillsPlanned
     while CrateRoute.UpgradeClicks < TargetClicks do
       if Stopped() or not UserConfigs.AutoCrates or not isrbxactive() or not CrateRoute.UpgradeMenuOpen() then break end
       local index = CrateRoute.UpgradeClicks + 1
-      local Button = index <= 2 and MaxBuy or index <= 4 and RegenBuy or RefillsBuy
-      CrateRoute.ClickButton(Button, 0.043, 0.016)
+      local isRegen = index > 2 and index <= 2 + CrateRoute.RegenPlanned
+      local Button = index <= 2 and MaxBuy or isRegen and RegenBuy or RefillsBuy
       CrateRoute.UpgradeClicks = index
-      Boot("HQ " .. (index <= 2 and "Max HP" or index <= 4 and "Regen" or "Refills") .. " click " .. index .. "/" .. TargetClicks)
+      WaveState.HQClicks = index
+      if isRegen then WaveState.RegenTotal = math.min(5, WaveState.RegenTotal + 1) end
+      CrateRoute.SaveWaveState()
+      CrateRoute.ClickButton(Button, 0.043, 0.016)
+      Boot("HQ " .. (index <= 2 and "Max HP" or isRegen and "Regen" or "Refills") .. " click " .. index .. "/" .. TargetClicks)
       task.wait(0.55)
     end
     if CrateRoute.UpgradeClicks == TargetClicks and isrbxactive() then
@@ -2067,7 +2111,7 @@ end
 -- Perk names and rarities from the AoTR Perks wiki, read 2026-11-04. The GUI cards
 -- carry the perk name but not a useful rarity label, so keep this catalog local.
 local UI
-PerkManager = { Pending = true, NextCheck = 0 }
+PerkManager = { Pending = true, SurveyPending = true, Owned = nil, NextCheck = 0 }
 PerkManager.Tiers = {
   [1] = "ENHANCED METABOLISM|ENDURING|FORTITUDE|CRIPPLE|HOLLOW|LUCKY|MIGHTY|FIRST AID|GEAR BEGINNER",
   [2] = "CRITICAL HUNTER|HEIGHTENED VITALITY|PROTECTION|TOUGH|UNYIELDING|BLESSED|FORCEFUL|LIGHTWEIGHT|MANGLE|EXPERIMENTAL SHELLS|FULLY STOCKED|GEAR INTERMEDIATE",
@@ -2205,8 +2249,7 @@ end
 function PerkManager.Handle(): boolean
   if not UserConfigs.AutoPerks then return false end
   if not UserConfigs.MenuDisabled and (not UI or not UI.ready) then return false end
-  if UserConfigs.AutoEquipmentUpgrades and CrateRoute.EquipmentPending then return false end
-  if UserConfigs.AutoStationUpgrades and CrateRoute.UpgradePending then return false end
+  if UserConfigs.AutoMarket and CrateRoute.MarketPending and not PerkManager.SurveyPending then return false end
   if not PerkManager.Pending and os.clock() < PerkManager.NextCheck then return false end
   if Qte.Active or IsTitanForm() or not isrbxactive() or not IsLocalAlive() then return false end
   local Equipment = Interface:FindFirstChild("Equipment")
@@ -2282,6 +2325,15 @@ function PerkManager.Handle(): boolean
       end
       if not PerkManager.Change(candidate, true) then break end
     end
+    local ownedCards = PerkManager.Scan()
+    if ownedCards then
+      PerkManager.Owned = {}
+      for _, card in ipairs(ownedCards) do PerkManager.Owned[card.Key] = true end
+      PerkManager.SurveyPending = false
+    else
+      PerkManager.Pending, PerkManager.NextCheck = true, os.clock() + 5
+      Boot("perk inventory scan failed")
+    end
     PerkManager.CloseInfo()
     if PerkManager.MenuOpen() and isrbxactive() then
       CrateRoute.ClickButton(UpgradesTab, 0.025, 0.04)
@@ -2295,9 +2347,171 @@ function PerkManager.Handle(): boolean
     end
     Boot("perk manager finished; menu " .. (PerkManager.MenuOpen() and "still open" or "closed"))
   else
+    PerkManager.Pending, PerkManager.NextCheck = true, os.clock() + 5
     Boot("perk menu did not open")
   end
   if wasVisible and UI.window and not Stopped() then pcall(function() UI.window:Show() end) end
+  if not Stopped() then WhatShouldIBeDoing = "attack" end
+  return true
+end
+
+-- Orange's Market rotates every wave. Buying a perk is immediate: the Buy button is
+-- the purchase itself, so only click a listing after name, stock, gold and ownership checks.
+local MarketManager = { NextAttempt = 0 }
+function MarketManager.MenuOpen(): boolean
+  local Market = Interface:FindFirstChild("Market")
+  local Categories = Market and Market:FindFirstChild("Categories")
+  local Perks = Categories and Categories:FindFirstChild("Market_Perks")
+  local Inner = Perks and Perks:FindFirstChild("Inner")
+  local Button = Inner and Inner:FindFirstChild("Interact")
+  local Viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+  local p = Button and Button.AbsolutePosition
+  return p ~= nil and Viewport ~= nil and p.Y > Viewport.Y * 0.03 and p.Y < Viewport.Y * 0.3
+end
+
+function MarketManager.Scan()
+  local Market = Interface:FindFirstChild("Market")
+  local Main = Market and Market:FindFirstChild("Main")
+  local Items = Main and Main:FindFirstChild("Items")
+  local Gold = Market and Market:FindFirstChild("Gold")
+  local GoldTitle = Gold and Gold:FindFirstChild("Title")
+  if not Items or not GoldTitle then return nil end
+  local amount = tonumber((GoldTitle.Text or ""):gsub("[^%d]", "")) or 0
+  local listings, onPerksPage = {}, false
+  for _, card in ipairs(Items:GetChildren()) do
+    local Inner = card:FindFirstChild("Inner")
+    local Item = Inner and Inner:FindFirstChild("Item")
+    local Stock = Inner and Inner:FindFirstChild("Stock")
+    local Amount = Stock and Stock:FindFirstChild("Amount")
+    local Buy = Inner and Inner:FindFirstChild("Buy")
+    local Price = Buy and Buy:FindFirstChild("Title")
+    local name = Item and Item.Text
+    if type(name) == "string" then
+      local key = PerkManager.Key(name)
+      if key == "PERK CRATE" or PerkManager.Rarity[key] then onPerksPage = true end
+      if PerkManager.Rarity[key] and Amount and Buy and Price then
+        table.insert(listings, { Name = name, Key = key, Card = card, Buy = Buy,
+          Stock = Amount, Price = tonumber((Price.Text or ""):gsub("[^%d]", "")) or math.huge,
+          Count = tonumber(string.match(Amount.Text or "", "^(%d+)")) or 0 })
+      end
+    end
+  end
+  return listings, amount, onPerksPage
+end
+
+function MarketManager.Handle(): boolean
+  if not UserConfigs.AutoMarket or not UserConfigs.AutoPerks or not CrateRoute.MarketPending then return false end
+  if PerkManager.SurveyPending or not PerkManager.Owned then return false end
+  if not UserConfigs.MenuDisabled and (not UI or not UI.ready) then return false end
+  if Qte.Active or IsTitanForm() or not isrbxactive() or not IsLocalAlive() or os.clock() < MarketManager.NextAttempt then return false end
+
+  local Waves = Workspace:FindFirstChild("Waves")
+  local NPCs = Waves and Waves:FindFirstChild("NPCs")
+  local Orange = NPCs and NPCs:FindFirstChild("Orange")
+  local NpcHrp = Orange and Orange:FindFirstChild("HumanoidRootPart")
+  local Hrp = GetPlayerHrp(LocalPlayer)
+  local Market = Interface:FindFirstChild("Market")
+  local Categories = Market and Market:FindFirstChild("Categories")
+  local Perks = Categories and Categories:FindFirstChild("Market_Perks")
+  local Inner = Perks and Perks:FindFirstChild("Inner")
+  local TabButton = Inner and Inner:FindFirstChild("Interact")
+  local CloseFrame = Market and Market:FindFirstChild("Market_Close")
+  local Close = CloseFrame and CloseFrame:FindFirstChild("Interact")
+  if not NpcHrp then
+    CrateRoute.MarketPending = false -- this station is a Waves feature
+    return false
+  end
+  if not Hrp or not TabButton or not Close then return false end
+
+  MarketManager.NextAttempt = os.clock() + 5
+  CurrentTitanTarget = nil
+  FarmStats.Target, FarmStats.Status = "market", "checking market"
+  WhatShouldIBeDoing = "market"
+  local wasVisible = UI and UI.window and UI.window.Visible
+  if wasVisible then
+    pcall(function() UI.window:Hide() end)
+    task.wait(0.12)
+  end
+  if not MarketManager.MenuOpen() then
+    local at = NpcHrp.Position
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    Hrp.CFrame = CFrame.new(at.X + 4, at.Y, at.Z - 2)
+    Hrp.AssemblyLinearVelocity = Vector3Zero
+    task.wait(0.45)
+    for _ = 1, 12 do
+      if Stopped() or not UserConfigs.AutoMarket or not isrbxactive() or not IsLocalAlive() then break end
+      if MarketManager.MenuOpen() then break end
+      keypress(0x45)
+      task.wait(0.15)
+      keyrelease(0x45)
+      task.wait(0.4)
+    end
+  end
+
+  if MarketManager.MenuOpen() and not Stopped() and isrbxactive() then
+    task.wait(0.55)
+    local listings, gold, onPerksPage = MarketManager.Scan()
+    if listings and not onPerksPage then
+      CrateRoute.ClickButton(TabButton, 0.025, 0.04)
+      task.wait(0.45)
+      listings, gold, onPerksPage = MarketManager.Scan()
+      -- An empty Perks page has no named cards from which to identify the tab.
+      if listings and #listings == 0 and MarketManager.MenuOpen() then onPerksPage = true end
+    end
+    if listings and onPerksPage and MarketManager.MenuOpen() then
+      local priority = {}
+      for _, name in ipairs(UserConfigs.PriorityPerks) do
+        if name ~= "" then priority[PerkManager.Key(name)] = true end
+      end
+      Boot("market checked on wave " .. tostring(CrateRoute.RoundNumber or CrateRoute.ReadRound() or "?")
+        .. ": " .. tostring(#listings) .. " perk listings, " .. tostring(gold) .. " gold")
+      for _, listing in ipairs(listings) do
+        if Stopped() or not UserConfigs.AutoMarket or not isrbxactive() or not MarketManager.MenuOpen() then break end
+        if priority[listing.Key] and not PerkManager.Owned[listing.Key]
+          and not WaveState.MarketAttempts[listing.Key] and listing.Count > 0 then
+          -- Read Gold again because an earlier buy in this same visit may have spent it.
+          local GoldTitle = Market.Gold and Market.Gold:FindFirstChild("Title")
+          local currentGold = GoldTitle and tonumber((GoldTitle.Text or ""):gsub("[^%d]", "")) or 0
+          if currentGold >= listing.Price then
+            WaveState.MarketAttempts[listing.Key] = true -- never repeat an unconfirmed immediate purchase
+            CrateRoute.SaveWaveState()
+            CrateRoute.ClickButton(listing.Buy, 0.031, 0.022)
+            local purchased = false
+            for _ = 1, 6 do
+              task.wait(0.25)
+              local remaining = tonumber(string.match(listing.Stock.Text or "", "^(%d+)")) or 0
+              if remaining < listing.Count then purchased = true; break end
+            end
+            if purchased then
+              PerkManager.Owned[listing.Key] = true
+              PerkManager.Pending = true -- equip the new priority before buying other upgrades
+              Boot("market bought priority perk " .. listing.Name .. " for " .. listing.Price)
+            else
+              Boot("market buy unconfirmed for " .. listing.Name .. "; no second click this round")
+            end
+          else
+            Boot("market skipped unaffordable priority " .. listing.Name .. " (" .. listing.Price .. " > " .. currentGold .. ")")
+          end
+        end
+      end
+      for _ = 1, 3 do
+        if not MarketManager.MenuOpen() or not isrbxactive() then break end
+        CrateRoute.ClickButton(Close, 0.012, 0.021)
+        task.wait(0.45)
+      end
+      if not MarketManager.MenuOpen() then
+        CrateRoute.MarketPending = false
+        Boot("market check complete; menu closed")
+      else
+        Boot("market X click did not close menu")
+      end
+    else
+      Boot("market perk listings unavailable")
+    end
+  else
+    Boot("market menu did not open")
+  end
+  if wasVisible and UI and UI.window and not Stopped() then pcall(function() UI.window:Show() end) end
   if not Stopped() then WhatShouldIBeDoing = "attack" end
   return true
 end
@@ -2525,6 +2739,20 @@ task.spawn(function() -- The main loop, where the magic happens
       task.wait(0.1)
       continue
     end
+    if UserConfigs.AutoPerks and UserConfigs.AutoMarket and CrateRoute.MarketPending then
+      if PerkManager.SurveyPending then
+        if PerkManager.Handle() then task.wait(0.1); continue end
+      else
+        if MarketManager.Handle() then task.wait(0.1); continue end
+      end
+      FarmStats.Status = "waiting for market check"
+      task.wait(0.5)
+      continue
+    end
+    if PerkManager.Handle() then
+      task.wait(0.1)
+      continue
+    end
     if CrateRoute.HandleEquipment() then
       task.wait(0.1)
       continue
@@ -2533,11 +2761,6 @@ task.spawn(function() -- The main loop, where the magic happens
       task.wait(0.1)
       continue
     end
-    if PerkManager.Handle() then
-      task.wait(0.1)
-      continue
-    end
-
     if not UserConfigs.Autofarm then
       CurrentTitanTarget = nil
       FarmStats.Status = "Waves tasks idle (titan farm off)"
@@ -2813,7 +3036,7 @@ local function buildMenu()
     Tooltip = "After crate delivery, visit Lulu and click Upgrade All five times",
     Callback = setter("AutoEquipmentUpgrades") }))
   reg("AutoStationUpgrades", farm:AddToggle("AutoStationUpgrades", { Text = "Auto HQ Upgrades", Default = UserConfigs.AutoStationUpgrades,
-    Tooltip = "After crate delivery and equipment, click Max HP twice and Regen twice; Refills on even waves",
+    Tooltip = "Once per wave: Max HP twice, Regen up to five total, Refills on even waves",
     Callback = setter("AutoStationUpgrades") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
     Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
@@ -2859,7 +3082,14 @@ local function buildMenu()
   local priorityRight = perksTab:AddRightGroupbox("Priority Perks 4-6")
   reg("AutoPerks", priorityLeft:AddToggle("AutoPerks", { Text = "Auto Manage Perks", Default = UserConfigs.AutoPerks,
     Tooltip = "Equip priority perks first, then the highest-rarity perks in remaining slots",
-    Callback = function(value) UserConfigs.AutoPerks = value == true; PerkManager.Pending = true; SaveSettings() end }))
+    Callback = function(value) UserConfigs.AutoPerks = value == true; PerkManager.Pending = true; PerkManager.SurveyPending = true; SaveSettings() end }))
+  reg("AutoMarket", priorityLeft:AddToggle("AutoMarket", { Text = "Auto Buy Missing Priority Perks", Default = UserConfigs.AutoMarket,
+    Tooltip = "After each Waves crate, check Orange's Market before upgrades. Requires Auto Manage Perks.",
+    Callback = function(value)
+      UserConfigs.AutoMarket = value == true
+      if UserConfigs.AutoMarket then CrateRoute.MarketPending = true; PerkManager.SurveyPending = true; PerkManager.Pending = true end
+      SaveSettings()
+    end }))
   local selectors = {}
   priorityLeft:AddInput("PerkSearch", { Text = "Search perk names", Default = "", Placeholder = "Type part of a perk name",
     Callback = function(query)
@@ -2885,6 +3115,10 @@ local function buildMenu()
           end
         end
         PerkManager.Pending = true
+        if UserConfigs.AutoMarket then
+          PerkManager.SurveyPending = true
+          CrateRoute.MarketPending = true
+        end
         SaveSettings()
       end }))
   end
