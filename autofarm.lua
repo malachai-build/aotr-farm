@@ -871,6 +871,7 @@ local NAPE_REPULL_DISTANCE = 3 -- studs; a nape closer than this to the pull spo
 local SizedNapes: { [number]: number } = {}
 local SizedNapesCount = 0
 local PULL_MAX_DISTANCE = 600 -- studs from the target beyond which nothing is pulled
+local PullSlash = 0 -- slashes pulled so far; the extra napes go on every other one
 local SkippedNapes = 0 -- nape writes refused by the live-titan check (black box: skipped=)
 local function PullNapesTo(target: Instance, extra: { Instance }?)
   local PlayerHrp = GetPlayerHrp(LocalPlayer); if not PlayerHrp then return end
@@ -897,7 +898,7 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
     local Nape = GetTitanWeakSpot(titan); if not Nape then return end
     Tr.step("main", "pull: live check")
     if not Writable(titan, Nape) then SkippedNapes += 1; return end
-    -- Read per nape: the player may move between writes.
+    -- Read per nape: with a frame between napes the player has moved since the last one.
     local Dest = PlayerHrp.CFrame * CFrame.new(0, UserConfigs.NapeOffsetY, 0)
     -- A Position read is cheap and a CFrame write is not: skip napes still sitting on the player.
     -- (Napes snap back to their titans, so in practice this rarely skips; seen 2026-11-03.)
@@ -917,8 +918,13 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
     end
   end
   Place(target)
-  if extra then
+  -- Pull All Napes wrote ~6 napes back to back every slash: ~110 ms without a yield, so the hover
+  -- and heartbeat stalled each slash, and both traced Matcha hangs (03:34, 03:39 on 2026-11-03)
+  -- came right after one. Now the extras go every other slash, one frame apart.
+  PullSlash += 1
+  if extra and PullSlash % 2 == 0 then
     for _, other in ipairs(extra) do
+      task.wait()
       if Stopped() or not IsValid(PlayerHrp) then break end
       if IsTitanAlive(other) then Place(other) end
     end
@@ -1202,17 +1208,45 @@ local function GetNearestTitanAny(): Instance?
   return Best
 end
 
--- Stop safely when recovery would otherwise move the player into a titan.
+-- Stuck (out of blades with no refill, or no kill for minutes): stop hovering, sit on the nearest
+-- titan and let it kill us so the run resets. The game has no reset button.
 local function GiveUpToTitan(reason: string?)
   reason = reason or "stuck refilling"
-  DebugPrint("warn", 0, nil, nil, reason .. ", pausing farm.")
-  Boot(reason .. ", pausing farm")
-  UserConfigs.Autofarm = false
-  WhatShouldIBeDoing = "paused"
+  DebugPrint("warn", 0, nil, nil, reason .. ", letting a titan kill us.")
+  Boot(reason .. ", feeding a titan")
+  WhatShouldIBeDoing = "dying" -- the RenderStepped hover only runs while attacking
   CurrentTitanTarget = nil
   FarmStats.Target = "none"
-  FarmStats.Status = reason .. ", paused"
+  FarmStats.Status = reason .. ", feeding a titan"
+
+  local Started = os.clock()
+  local LastTp = 0
+
+  while not Stopped() and os.clock() - Started < 30 do
+    Progress()
+    local Humanoid = GetPlayerHumanoid(LocalPlayer)
+    local ok, health = pcall(function() return Humanoid.Health end)
+    if not ok or type(health) ~= "number" or health <= 0 then break end
+
+    -- Re-teleport every 2s (titans walk); CFrame writes are expensive, so not per frame.
+    if os.clock() - LastTp > 2 then
+      local Hrp = GetPlayerHrp(LocalPlayer)
+      local Titan = GetNearestTitanAny()
+      local TitanHrp = Titan and GetTitanHrp(Titan)
+      if Hrp and TitanHrp then
+        Hrp.AssemblyLinearVelocity = Vector3Zero
+        local p = TitanHrp.Position
+        Tr.step("main", "give up: tp onto titan (write)")
+        Hrp.CFrame = CFrame.new(p.X, p.Y, p.Z) -- matcha's CFrame.new rejects a single Vector3
+        LastTp = os.clock()
+      end
+    end
+
+    task.wait(0.25)
+  end
+
   RefillStuckSince = nil
+  WhatShouldIBeDoing = "attack"
 end
 
 
@@ -1238,10 +1272,7 @@ local function HandleAllReloads()
       -- Shifting mid-refill left the titan hanging at the reload spot (2026-11-02): drop the refill.
       local okShift, Shifter = pcall(function() return LocalPlayer.Character:GetAttribute("Shifter") end)
       if TitanForm or (okShift and Shifter ~= nil) then RefillStuckSince = nil; WhatShouldIBeDoing = "attack"; break end
-      if os.clock() - RefillStuckSince > REFILL_STUCK_LIMIT then
-        GiveUpToTitan()
-        return
-      end
+      if os.clock() - RefillStuckSince > REFILL_STUCK_LIMIT then GiveUpToTitan(); return end
       if IsReloadingBlades() then
         task.wait(0.5)
         continue
@@ -1743,9 +1774,10 @@ local function KillTitan(titan: Instance)
   print("[Aotr] targeting " .. titan.Name:sub(1, 8))
   FarmStats.Target = titan.Name:sub(1, 8)
   FarmStats.Status = "attacking"
-  local LastSlashAt = -math.huge
   while true do
     Progress()
+    Tr.step("main", "attack delay")
+    task.wait(UserConfigs.AttackDelay)
     Tr.step("main", "kill checks")
     if Stopped() or not UserConfigs.Autofarm then break end
     if not IsTitanAlive(titan) then
@@ -1805,16 +1837,11 @@ local function KillTitan(titan: Instance)
         PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
       end
 
-      local WaitForSlash = LastSlashAt + UserConfigs.AttackDelay - os.clock()
-      if WaitForSlash > 0 then
-        Tr.step("main", "player slash delay")
-        task.wait(WaitForSlash)
-      end
-      if Stopped() or not UserConfigs.Autofarm then break end
-      if not isrbxactive() or Qte.Active or WhatShouldIBeDoing ~= "attack" then continue end
+      Tr.step("main", "slash wait")
+      task.wait()
       Tr.step("main", "click")
       mouse1click()
-      LastSlashAt = os.clock()
+      task.wait(0.03)
       if Shifted then
         FarmStats.Status = "titan attacking"
         Tr.step("main", "titan skill")
@@ -1822,7 +1849,6 @@ local function KillTitan(titan: Instance)
       else
         Tr.step("main", "space")
         keypress(0x20)
-        -- Hold Space briefly so the game sees the key press; the slash interval is timed above.
         task.wait(0.03)
         keyrelease(0x20)
         Tr.step("main", "try shift")
