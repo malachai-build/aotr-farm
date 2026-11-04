@@ -2390,7 +2390,7 @@ function CrateRoute.MarketManager.Scan()
   local Gold = Market and Market:FindFirstChild("Gold")
   local GoldTitle = Gold and Gold:FindFirstChild("Title")
   if not Items or not GoldTitle then return nil end
-  local amount = tonumber((GoldTitle.Text or ""):gsub("[^%d]", "")) or 0
+  local amount = tonumber(((GoldTitle.Text or ""):gsub("[^%d]", ""))) or 0
   local listings, onPerksPage = {}, false
   for _, card in ipairs(Items:GetChildren()) do
     local Inner = card:FindFirstChild("Inner")
@@ -2405,7 +2405,7 @@ function CrateRoute.MarketManager.Scan()
       if key == "PERK CRATE" or PerkManager.Rarity[key] then onPerksPage = true end
       if PerkManager.Rarity[key] and Amount and Buy and Price then
         table.insert(listings, { Name = name, Key = key, Card = card, Buy = Buy,
-          Stock = Amount, Price = tonumber((Price.Text or ""):gsub("[^%d]", "")) or math.huge,
+          Stock = Amount, Price = tonumber(((Price.Text or ""):gsub("[^%d]", ""))) or math.huge,
           Count = tonumber(string.match(Amount.Text or "", "^(%d+)")) or 0 })
       end
     end
@@ -2485,7 +2485,7 @@ function CrateRoute.MarketManager.Handle(): boolean
           and not CrateRoute.WaveState.MarketAttempts[listing.Key] and listing.Count > 0 then
           -- Read Gold again because an earlier buy in this same visit may have spent it.
           local GoldTitle = Market.Gold and Market.Gold:FindFirstChild("Title")
-          local currentGold = GoldTitle and tonumber((GoldTitle.Text or ""):gsub("[^%d]", "")) or 0
+          local currentGold = GoldTitle and tonumber(((GoldTitle.Text or ""):gsub("[^%d]", ""))) or 0
           if currentGold >= listing.Price then
             CrateRoute.WaveState.MarketAttempts[listing.Key] = true -- never repeat an unconfirmed immediate purchase
             CrateRoute.SaveWaveState()
