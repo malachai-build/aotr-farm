@@ -810,7 +810,16 @@ end
 local function GetHoverPoint(titan: Instance): (number?, number?, number?)
   local TitanHrp = GetTitanHrp(titan); if not TitanHrp then return nil end
   local p = TitanHrp.Position
-  return p.X + UserConfigs.HoverOffsetX, p.Y + GetTitanBobHeight(titan), p.Z + UserConfigs.HoverOffsetZ
+  local dx, dy, dz = UserConfigs.HoverOffsetX, GetTitanBobHeight(titan), UserConfigs.HoverOffsetZ
+  if IsBossTitan(titan) then
+    -- Raid bosses only activate when the player is roughly 500 studs away or closer.
+    local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if distance > 450 then
+      local scale = 450 / distance
+      dx, dy, dz = dx * scale, dy * scale, dz * scale
+    end
+  end
+  return p.X + dx, p.Y + dy, p.Z + dz
 end
 
 
@@ -1927,8 +1936,10 @@ function CrateRoute.HandleRaidChest(): boolean
       Boot("key chest skipped: no keys shown")
     elseif premium and IsObjectVisible(premium) then
       FarmStats.Status = "opening key chest"
-      CrateRoute.ClickButton(premium, 0.044, 0.018)
-      task.wait(0.6)
+      -- Live hover: (1792,1008) from Premium.AbsolutePosition (1689.6,982.8)
+      -- at 2560x1440. Matcha reports zero AbsoluteSize for this button.
+      CrateRoute.ClickButton(premium, 0.04, 0.0175)
+      task.wait(1)
       CrateRoute.RaidChestOpenedAt = os.clock() -- let the key chest reveal finish before clicking Finish
       local after = premium:FindFirstChild("Title")
       local afterText = after and after.Text or ""
