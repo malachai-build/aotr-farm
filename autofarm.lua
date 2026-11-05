@@ -1922,6 +1922,9 @@ end
 CrateRoute.RaidChestOpenedAt = nil
 CrateRoute.RaidKeyChestDone = false
 CrateRoute.RaidKeyChestCount = nil
+CrateRoute.RaidKeyChestAttempts = 0
+CrateRoute.RaidKeyChestAttemptAt = nil
+CrateRoute.RaidKeyChestWarned = false
 function CrateRoute.HandleRaidChest(): boolean
   local chests = Interface:FindFirstChild("Chests")
   if not chests or not IsObjectVisible(chests) then
@@ -1929,6 +1932,9 @@ function CrateRoute.HandleRaidChest(): boolean
     CrateRoute.RaidChestOpenedAt = nil
     CrateRoute.RaidKeyChestDone = false
     CrateRoute.RaidKeyChestCount = nil
+    CrateRoute.RaidKeyChestAttempts = 0
+    CrateRoute.RaidKeyChestAttemptAt = nil
+    CrateRoute.RaidKeyChestWarned = false
     return false
   end
   if not UserConfigs.AutoRaidChest then return false end
@@ -1962,8 +1968,29 @@ function CrateRoute.HandleRaidChest(): boolean
         Boot("key chest opened")
       else
         FarmStats.Status = "key chest click unconfirmed"
+        if CrateRoute.RaidKeyChestAttempts == 1 and os.clock() - CrateRoute.RaidKeyChestAttemptAt >= 5 and premium and isrbxactive() then
+          local pos = premium.AbsolutePosition
+          local viewport = Workspace.CurrentCamera.ViewportSize
+          local x = math.floor(pos.X + viewport.X * 0.04)
+          local y = math.floor(pos.Y + viewport.Y * 0.0175)
+          local mouse = LocalPlayer:GetMouse()
+          if math.abs(mouse.X - x) > 6 or math.abs(mouse.Y - y) > 6 then
+            mousemoveabs(x, y)
+            mousemoverel(1, 0)
+            task.wait(0.5)
+          end
+          if math.abs(mouse.X - x) <= 6 and math.abs(mouse.Y - y) <= 6 then
+            mouse1click() -- the separate click at the settled hover succeeded in the live test
+            CrateRoute.RaidKeyChestAttempts = 2
+            CrateRoute.RaidKeyChestAttemptAt = os.clock()
+            Boot("key chest second click after unchanged count: " .. tostring(keys))
+          end
+        elseif CrateRoute.RaidKeyChestAttempts == 2 and not CrateRoute.RaidKeyChestWarned and os.clock() - CrateRoute.RaidKeyChestAttemptAt >= 5 then
+          CrateRoute.RaidKeyChestWarned = true
+          Boot("key chest still unconfirmed after two clicks; holding chest screen")
+        end
         task.wait(0.3)
-        return true -- never click Finish or spend a second key while the first click is unconfirmed
+        return true -- hold Finish after at most two attempts until the key count confirms opening
       end
     elseif not CrateRoute.RaidKeyChestDone and keys == 0 then
       CrateRoute.RaidKeyChestDone = true
@@ -1972,6 +1999,8 @@ function CrateRoute.HandleRaidChest(): boolean
       FarmStats.Status = "opening key chest"
       if CrateRoute.ClickKeyChest(premium) then
         CrateRoute.RaidKeyChestCount = keys
+        CrateRoute.RaidKeyChestAttempts = 1
+        CrateRoute.RaidKeyChestAttemptAt = os.clock()
         Boot("key chest click attempt: " .. label)
         task.wait(1)
       else
