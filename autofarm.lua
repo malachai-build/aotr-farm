@@ -104,6 +104,8 @@ local UserConfigs = {
   Autofarm = true,
   AutoRetry = true,       -- press Retry on the rewards screen
   AutoReload = true,      -- reload blades / refill gas when they run out
+  AutoSkipCutscenes = true, -- press E when the cutscene Skip prompt appears
+  AutoRaidChest = true,   -- open the free raid chest, then finish its screen
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
   AutoStationUpgrades = true, -- buy Regen first, then HQ Max HP twice; Refills on even waves
@@ -136,7 +138,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "HumanSkills", "AwakeningSlot",
@@ -1364,6 +1366,26 @@ local function IsObjectVisible(object: GuiObject): boolean
   return visible
 end
 
+Stats.CutsceneSkip = { Frame = nil, Down = false, ReleaseAt = 0, NextPress = 0, Visible = false }
+function Stats.SkipCutsceneTick()
+  local skip = Stats.CutsceneSkip
+  local now = os.clock()
+  if skip.Down and now >= skip.ReleaseAt then
+    keyrelease(0x45)
+    skip.Down = false
+  end
+  if not UserConfigs.AutoSkipCutscenes then skip.Visible = false; return end
+  if not skip.Frame or not skip.Frame.Parent then skip.Frame = Interface:FindFirstChild("Skip") end
+  skip.Visible = skip.Frame ~= nil and IsObjectVisible(skip.Frame)
+  if skip.Visible and isrbxactive() and not skip.Down and now >= skip.NextPress then
+    keypress(0x45) -- SKIP [E]
+    skip.Down = true
+    skip.ReleaseAt = now + 0.12
+    skip.NextPress = now + 1
+    Boot("cutscene skip E pressed")
+  end
+end
+
 
 local function IsRetryVisible(): boolean
 
@@ -1383,52 +1405,21 @@ end
 local RetryCount = 0
 
 local function PressRetry()
-  if not IsRetryVisible() then return end
-
-  DebugPrint("debug", 0, nil, "PressRetry", "Pressing the retry button.")
-  Boot(string.format("retry press %d via %s", RetryCount + 1, RetryCount % 4 < 3 and "keys" or "mouse"))
-  task.wait(0.5)
-
-  -- Three key attempts, then one mouse click, repeating: the mouse click alone missed for minutes
-  -- (00:18-00:25, 2026-11-02) while keys were never tried again.
-  if RetryCount % 4 < 3 then -- ui navigation
-    keypress(0xDC) -- Backslash key
-    task.wait(0.3)
-    keyrelease(0xDC)
-    task.wait(1.0)
-
-    keypress(0x44) -- D key
-    task.wait(0.2)
-    keyrelease(0x44)
-    task.wait(0.4)
-
-    keypress(0x44) -- D key
-    task.wait(0.2)
-    keyrelease(0x44)
-    task.wait(0.4)
-
-    keypress(0x0D) -- Enter key
-    task.wait(0.3)
-    keyrelease(0x0D)
-    task.wait(0.6)
-
-    RetryCount += 1
-
-  else -- Press retry via mouse
-    local RetryButton = GetPath(PlayerGui, true, "Interface", "Rewards", "Main", "Info", "Main", "Buttons", "Retry") :: GuiObject; if not RetryButton then return end
-      
-    local AbsolutePositionBtn = RetryButton.AbsolutePosition
-    local AbsoluteSizeBtn = RetryButton.AbsoluteSize
-
-    local TargetX = AbsolutePositionBtn.X + (AbsoluteSizeBtn.X / 2)
-    local TargetY = AbsolutePositionBtn.Y + (AbsoluteSizeBtn.Y / 2) + 36
-
-
-    mousemoveabs(TargetX, TargetY)
-    task.wait(1)
-    mouse1click()
-    RetryCount += 1
-  end
+  if not IsRetryVisible() or not isrbxactive() then return end
+  local button = GetPath(PlayerGui, false, "Interface", "Rewards", "Main", "Info", "Main", "Buttons", "Retry") :: GuiObject?
+  local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+  if not button or not viewport then return end
+  local pos, size = button.AbsolutePosition, button.AbsoluteSize
+  -- Live hover on the raid reward screen: (1427,1137) at 2560x1440, relative to
+  -- Retry.AbsolutePosition (1428,1103). Matcha reports zero AbsoluteSize here.
+  local x = pos.X + (size.X > 1 and size.X / 2 or -viewport.X * 0.0004)
+  local y = pos.Y + (size.Y > 1 and size.Y / 2 or viewport.Y * 0.024)
+  mousemoveabs(math.floor(x), math.floor(y))
+  mousemoverel(1, 0)
+  task.wait(0.18)
+  mouse1click()
+  RetryCount += 1
+  Boot(string.format("retry direct click %d", RetryCount))
 end
 
 --#endregion -- Ui elements functions --
@@ -1877,6 +1868,44 @@ function CrateRoute.ClickButton(Button: Instance, fallbackX: number, fallbackY: 
   mousemoverel(1, 0) -- Matcha's absolute move alone does not trigger this game's GUI hover.
   task.wait(0.18)
   mouse1click()
+end
+
+-- The raid ends at Interface.Chests before the usual Rewards screen. Matcha reads these
+-- buttons' AbsolutePosition but reports zero AbsoluteSize, so the hover samples supply
+-- viewport-scaled click offsets. The free button disappears once its chest opens.
+CrateRoute.RaidChestOpenedAt = nil
+function CrateRoute.HandleRaidChest(): boolean
+  local chests = Interface:FindFirstChild("Chests")
+  if not chests or not IsObjectVisible(chests) then
+    if WhatShouldIBeDoing == "chest" then WhatShouldIBeDoing = "attack" end
+    CrateRoute.RaidChestOpenedAt = nil
+    return false
+  end
+  if not UserConfigs.AutoRaidChest then return false end
+  CurrentTitanTarget = nil
+  WhatShouldIBeDoing = "chest"
+  FarmStats.Status = "opening raid chest"
+  if not isrbxactive() then task.wait(0.3); return true end
+  local free = chests:FindFirstChild("Free")
+  if free and IsObjectVisible(free) then
+    CrateRoute.ClickButton(free, 0.044, 0.018)
+    task.wait(0.6)
+    if not IsObjectVisible(free) then
+      CrateRoute.RaidChestOpenedAt = os.clock()
+      Boot("free raid chest opened")
+    end
+    return true
+  end
+  CrateRoute.RaidChestOpenedAt = CrateRoute.RaidChestOpenedAt or os.clock()
+  if os.clock() - CrateRoute.RaidChestOpenedAt < 1.5 then task.wait(0.2); return true end
+  local finish = chests:FindFirstChild("Finish")
+  if finish and IsObjectVisible(finish) then
+    FarmStats.Status = "finishing raid chest"
+    CrateRoute.ClickButton(finish, 0.067, 0.017)
+    task.wait(0.6)
+    if not IsObjectVisible(chests) then Boot("raid chest finished; rewards screen opened") end
+  end
+  return true
 end
 
 function CrateRoute.ReadGold(menu: Instance): number?
@@ -2557,6 +2586,7 @@ local function KillTitan(titan: Instance)
   print("[Aotr] targeting " .. titan.Name:sub(1, 8))
   FarmStats.Target = titan.Name:sub(1, 8)
   FarmStats.Status = "attacking"
+  local LastChestCheck = 0
   while true do
     Progress()
     Tr.step("main", "attack delay")
@@ -2564,6 +2594,11 @@ local function KillTitan(titan: Instance)
     Tr.step("main", "kill checks")
     if Stopped() or not UserConfigs.Autofarm then break end
     if CrateRoute.Pending() then break end
+    if IsBoss and os.clock() - LastChestCheck > 0.5 then
+      LastChestCheck = os.clock()
+      local chests = Interface:FindFirstChild("Chests")
+      if chests and IsObjectVisible(chests) then break end
+    end
     if not IsTitanAlive(titan) then
       FarmStats.Kills += 1
       print(string.format("[Aotr] %s down after %.1fs", titan.Name:sub(1, 8), os.clock() - StartTime))
@@ -2599,6 +2634,11 @@ local function KillTitan(titan: Instance)
 
       if UserConfigs.PullAllNapes and (os.clock() - PullListAt > 0.5 or PullListFor ~= TitanAddress) then
         PullList = GetPullTargets(titan); PullListAt = os.clock(); PullListFor = TitanAddress
+      end
+      if Stats.CutsceneSkip.Visible then
+        FarmStats.Status = "skipping cutscene"
+        task.wait(0.1)
+        continue
       end
       if Qte.Active then -- a click or Space mid-QTE could count as the wrong key
         FarmStats.Status = "quick time event"
@@ -2697,6 +2737,12 @@ task.spawn(function() -- The main loop, where the magic happens
   while not Stopped() do
     Tr.step("main", "loop top")
     FindQteUi()
+    if CrateRoute.HandleRaidChest() then
+      LastKillAt = os.clock()
+      Progress()
+      task.wait(0.1)
+      continue
+    end
     -- A stuck mission keeps a fresh heartbeat (5 hours on 2026-11-02), so after NoKillMinutes
     -- without a kill the character feeds itself to a titan and the run resets. A raid boss takes
     -- minutes to kill, so while one is alive the limit is BossNoKillMinutes.
@@ -2896,9 +2942,18 @@ local function HoverStep()
 end
 
 local function OnRenderStepped()
-  if Stopped() then if RenderConn then RenderConn:Disconnect() end; pcall(StatusCleanup); print("[Aotr] stopped"); return end
+  if Stopped() then
+    if Stats.CutsceneSkip and Stats.CutsceneSkip.Down then keyrelease(0x45); Stats.CutsceneSkip.Down = false end
+    if RenderConn then RenderConn:Disconnect() end
+    pcall(StatusCleanup)
+    print("[Aotr] stopped")
+    return
+  end
   LastHoverAt = os.clock()
   pcall(Tr.flush)
+  Tr.step("render", "cutscene skip")
+  local okSkip, skipErr = pcall(Stats.SkipCutsceneTick)
+  if not okSkip and os.clock() - LastHoverError > 5 then LastHoverError = os.clock(); Boot("cutscene skip error: " .. tostring(skipErr)) end
   Tr.step("render", "qte")
   local okQte, qteErr = pcall(QteTick)
   if not okQte and os.clock() - LastHoverError > 5 then LastHoverError = os.clock(); Boot("qte tick error: " .. tostring(qteErr)) end
@@ -3033,6 +3088,10 @@ local function buildMenu()
   reg("AutoReload", farm:AddToggle("AutoReload", { Text = "Auto Reload / Refill", Default = UserConfigs.AutoReload,
     Tooltip = "Reload blades at the safe spot; refill at the gas tank on maps the script knows",
     Callback = setter("AutoReload") }))
+  reg("AutoSkipCutscenes", farm:AddToggle("AutoSkipCutscenes", { Text = "Auto Skip Cutscenes", Default = UserConfigs.AutoSkipCutscenes,
+    Tooltip = "Press E when the cutscene Skip prompt appears", Callback = setter("AutoSkipCutscenes") }))
+  reg("AutoRaidChest", farm:AddToggle("AutoRaidChest", { Text = "Auto Raid Chest", Default = UserConfigs.AutoRaidChest,
+    Tooltip = "Open the free left chest, then click Finish before Retry", Callback = setter("AutoRaidChest") }))
   reg("AutoCrates", farm:AddToggle("AutoCrates", { Text = "Auto Crate Delivery", Default = UserConfigs.AutoCrates,
     Tooltip = "Touch your spawned Waves crate, then the drop-off cart",
     Callback = setter("AutoCrates") }))
