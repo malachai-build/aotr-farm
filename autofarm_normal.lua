@@ -6,10 +6,12 @@
 
 -- Script version: 1.0.7
 
+-- Shared watchdog files use Matcha's file workspace, independent of the app.exe location.
+if not isfolder("aotr") then makefolder("aotr") end
+
 -- Manual/local execution must stand down before loading the UI or mission services.
 -- Main menu, lobby, trade hub: "unloaded" works with the unchanged watcher.
 if game.PlaceId == 13379208636 or game.PlaceId == 14916516914 or game.PlaceId == 14932214603 then
-  if not isfolder("aotr") then makefolder("aotr") end
   writefile("aotr/heartbeat.txt", "unloaded " .. os.date("%H:%M:%S"))
   return
 end

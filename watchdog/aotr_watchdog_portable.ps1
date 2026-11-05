@@ -1,10 +1,11 @@
-<#
+﻿<#
 AoTR farm watchdog. Run it in its own PowerShell window while farming:
 
   powershell -ExecutionPolicy Bypass -File .\aotr_watchdog_portable.ps1 -RestartMatcha -RestartOnTeleport
 
-Matcha and its workspace are discovered from the running process, common install locations, and
-the farm's heartbeat/source files. Use -MatchaExe or -WorkspaceRoot only for unusual installs.
+Matcha is discovered from its process and install locations. Its workspace is verified by a
+temporary marker written through Matcha MCP; when MCP is unavailable the default is C:\matcha\workspace. A fresh install needs no AoTR files: the workspace and aotr
+folder are created if absent. Use -MatchaExe or -WorkspaceRoot only for unusual installs.
 
 Why: when the character dies before a mission has loaded in, Matcha does not reload, so neither
 the MCP nor auto-exec (nor the farm) runs and the run stalls. The farm writes
@@ -59,62 +60,206 @@ param(
   [string]$LobbyPlaceId = "14916516914",
   [string]$Heartbeat,
   [string]$Log,
+  [switch]$ShowWorkspace, # open the selected workspace in Explorer, then exit
   [switch]$ValidateOnly,  # show discovered paths and exit without starting the watchdog loop
   [switch]$DryRun
 )
+
+# app.exe is a generic name: identify Matcha by its installation, metadata, or MCP listener.
+function Test-MatchaExecutable([string]$Path) {
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+  $file = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+  if (-not $file -or $file.Extension -ne '.exe') { return $false }
+  if ($file.BaseName -match '^matcha(?:[-_ ].*)?$') { return $true }
+  if ($file.BaseName -ne 'app') { return $false }
+  if ($Path -match '[\\/]matcha[\\/]') { return $true }
+  try {
+    if (($file.VersionInfo.ProductName + ' ' + $file.VersionInfo.FileDescription) -match '(?i)matcha') { return $true }
+  } catch {}
+  $folder = $file.DirectoryName
+  foreach ($root in @($folder, (Split-Path -Parent $folder))) {
+    if (-not $root) { continue }
+    # A renamed portable folder still has Matcha's workspace/autoexec layout.
+    if ((Test-Path -LiteralPath (Join-Path $root 'workspace') -PathType Container) -and
+        (($file.Directory.Name -eq 'usermode') -or
+         (Test-Path -LiteralPath (Join-Path $root 'autoexec') -PathType Container) -or
+         (Test-Path -LiteralPath (Join-Path $root 'workspace\aotr') -PathType Container))) { return $true }
+  }
+  return $false
+}
 
 function Find-MatchaExe {
   if ($MatchaExe) {
     if (-not (Test-Path -LiteralPath $MatchaExe -PathType Leaf)) { throw "Matcha executable not found: $MatchaExe" }
     return (Resolve-Path -LiteralPath $MatchaExe).Path
   }
-  $candidates = @()
-  $candidates += Get-Process -Name app -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and $_.Path -match '[\\/]matcha[\\/]' } |
-    ForEach-Object { $_.Path }
-  if ($env:MATCHA_EXE) { $candidates += $env:MATCHA_EXE }
-  if ($env:MATCHA_HOME) { $candidates += (Join-Path $env:MATCHA_HOME 'usermode\app.exe') }
-  foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) {
-    $candidates += (Join-Path $drive.Root 'matcha\usermode\app.exe')
+  # Explicit environment configuration also works for renamed installations.
+  $configured = @()
+  if ($env:MATCHA_EXE) { $configured += $env:MATCHA_EXE }
+  if ($env:MATCHA_HOME) {
+    $configured += (Join-Path $env:MATCHA_HOME 'usermode\app.exe')
+    $configured += (Join-Path $env:MATCHA_HOME 'app.exe')
   }
-  foreach ($base in @($env:LOCALAPPDATA, $env:APPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-    if ($base) { $candidates += (Join-Path $base 'Matcha\usermode\app.exe') }
-  }
-  foreach ($candidate in ($candidates | Select-Object -Unique)) {
+  foreach ($candidate in $configured) {
     if (Test-Path -LiteralPath $candidate -PathType Leaf) { return (Resolve-Path -LiteralPath $candidate).Path }
   }
-  throw 'Matcha executable not found. Start Matcha once or pass -MatchaExe <full path>.'
+
+  # Get-Process.Path can be empty for elevated processes. CIM sometimes exposes the path instead.
+  $processes = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'app' -or $_.ProcessName -match '^matcha' })
+  $cimProcesses = @()
+  try { $cimProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'app.exe' OR Name LIKE 'matcha%.exe'" -ErrorAction Stop) } catch {}
+  # The process listening on the configured local MCP port is useful evidence even in a renamed folder.
+  $listenerIds = @()
+  try {
+    $uri = [Uri]$McpUrl
+    if ($uri.IsLoopback) {
+      $listenerIds = @(Get-NetTCPConnection -State Listen -LocalPort $uri.Port -ErrorAction Stop |
+        Where-Object { $_.LocalAddress -in @('127.0.0.1', '::1', '0.0.0.0', '::') } |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+    }
+  } catch {}
+  $running = @(
+    foreach ($proc in $processes) {
+      $path = $null
+      try { $path = $proc.Path } catch {}
+      if (-not $path) { $path = ($cimProcesses | Where-Object { $_.ProcessId -eq $proc.Id } | Select-Object -First 1).ExecutablePath }
+      if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if (($listenerIds -contains $proc.Id) -or $proc.MainWindowTitle -match '(?i)matcha' -or (Test-MatchaExecutable $path)) {
+          [pscustomobject]@{ Path = $path; Listener = ($listenerIds -contains $proc.Id) }
+        }
+      }
+    }
+    foreach ($proc in $cimProcesses) {
+      if ($proc.ExecutablePath -and (($listenerIds -contains $proc.ProcessId) -or (Test-MatchaExecutable $proc.ExecutablePath))) {
+        [pscustomobject]@{ Path = $proc.ExecutablePath; Listener = ($listenerIds -contains $proc.ProcessId) }
+      }
+    }
+  )
+  $best = $running | Sort-Object Listener -Descending | Select-Object -First 1
+  if ($best) { return (Resolve-Path -LiteralPath $best.Path).Path }
+
+  $candidates = @()
+  foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) {
+    $candidates += (Join-Path $drive.Root 'matcha\usermode\app.exe')
+    $candidates += (Join-Path $drive.Root 'matcha\app.exe')
+  }
+  foreach ($base in @($env:LOCALAPPDATA, $env:APPDATA, $env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+    if ($base) {
+      $candidates += (Join-Path $base 'Matcha\usermode\app.exe')
+      $candidates += (Join-Path $base 'Matcha\app.exe')
+    }
+  }
+  # Explicit workspace/heartbeat paths also point back to the installation.
+  foreach ($workspace in @($WorkspaceRoot, $env:MATCHA_WORKSPACE, $(if ($Heartbeat) { Split-Path -Parent (Split-Path -Parent $Heartbeat) }))) {
+    if ($workspace) {
+      $root = Split-Path -Parent $workspace
+      if ($root) {
+        $candidates += (Join-Path $root 'usermode\app.exe')
+        $candidates += (Join-Path $root 'app.exe')
+      }
+    }
+  }
+  foreach ($candidate in ($candidates | Select-Object -Unique)) {
+    if (Test-MatchaExecutable $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
+  }
+
+  # Search nearby portable installs, not entire drives. No junction traversal; depth/work are bounded.
+  $roots = @($PSScriptRoot, (Get-Location).Path)
+  if ($PSScriptRoot) { $roots += Split-Path -Parent $PSScriptRoot }
+  if ($env:USERPROFILE) { $roots += Join-Path $env:USERPROFILE 'Downloads' }
+  $roots += [Environment]::GetFolderPath('Desktop')
+  if ($env:LOCALAPPDATA) { $roots += Join-Path $env:LOCALAPPDATA 'Programs' }
+  $queue = New-Object 'System.Collections.Generic.Queue[object]'
+  foreach ($root in ($roots | Where-Object { $_ } | Select-Object -Unique)) {
+    if (Test-Path -LiteralPath $root -PathType Container) { $queue.Enqueue(@{ Path = $root; Depth = 0 }) }
+  }
+  $visited = @{}
+  $checked = 0
+  while ($queue.Count -gt 0 -and $checked -lt 2000) {
+    $entry = $queue.Dequeue()
+    if ($visited.ContainsKey($entry.Path)) { continue }
+    $visited[$entry.Path] = $true
+    $checked++
+    foreach ($name in @('app.exe', 'matcha.exe')) {
+      $candidate = Join-Path $entry.Path $name
+      if (Test-MatchaExecutable $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
+    }
+    if ($entry.Depth -ge 3) { continue }
+    foreach ($dir in (Get-ChildItem -LiteralPath $entry.Path -Directory -ErrorAction SilentlyContinue)) {
+      if (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+      if ($dir.Name -in @('node_modules', '.git', 'Cache', 'CacheStorage', 'logs')) { continue }
+      $queue.Enqueue(@{ Path = $dir.FullName; Depth = $entry.Depth + 1 })
+    }
+  }
+  $unreadable = @($processes | Where-Object { -not $_.Path }).Count
+  $hint = if ($unreadable) { ' An app.exe process has no readable path; if Matcha is elevated, run this watchdog at the same privilege level.' } else { '' }
+  throw "Matcha app.exe not found in running processes or nearby install folders.$hint Pass -MatchaExe <full path to app.exe> for an unusual install."
 }
 
 function Find-WorkspaceRoot {
-  if ($WorkspaceRoot) {
-    if (-not (Test-Path -LiteralPath $WorkspaceRoot -PathType Container)) { throw "Workspace not found: $WorkspaceRoot" }
-    return (Resolve-Path -LiteralPath $WorkspaceRoot).Path
+  $explicit = if ($WorkspaceRoot) { $WorkspaceRoot } elseif ($env:MATCHA_WORKSPACE) { $env:MATCHA_WORKSPACE } elseif ($Heartbeat) { Split-Path -Parent (Split-Path -Parent $Heartbeat) }
+  if ($explicit -and -not (Test-Path -LiteralPath $explicit -PathType Container)) {
+    throw "Workspace not found: $explicit"
   }
-  if ($Heartbeat) { return (Split-Path -Parent (Split-Path -Parent $Heartbeat)) }
-  $candidates = @()
-  if ($env:MATCHA_WORKSPACE) { $candidates += $env:MATCHA_WORKSPACE }
-  $candidates += (Join-Path (Split-Path -Parent (Split-Path -Parent $MatchaExe)) 'workspace')
+  # Matcha's file sandbox can be independent of the executable location.
+  # This build uses C:\matcha\workspace even when app.exe is installed on D:.
+  $standardWorkspace = 'C:\matcha\workspace'
+  $exeFolder = Split-Path -Parent $MatchaExe
+  $candidates = @($explicit, $standardWorkspace, (Join-Path $exeFolder 'workspace'), (Join-Path (Split-Path -Parent $exeFolder) 'workspace'))
   foreach ($drive in (Get-PSDrive -PSProvider FileSystem)) {
-    $candidates += (Join-Path $drive.Root 'matcha\workspace')
+    $candidates += Join-Path $drive.Root 'matcha\workspace'
   }
   foreach ($base in @($env:LOCALAPPDATA, $env:APPDATA)) {
-    if ($base) { $candidates += (Join-Path $base 'Matcha\workspace') }
+    if ($base) { $candidates += Join-Path $base 'Matcha\workspace' }
   }
-  $found = foreach ($candidate in ($candidates | Select-Object -Unique)) {
-    $farm = Join-Path $candidate 'aotr\autofarm.lua'
-    $branch = Join-Path $candidate 'aotr\autofarm_branch.lua'
-    $beat = Join-Path $candidate 'aotr\heartbeat.txt'
-    if ((Test-Path -LiteralPath $farm -PathType Leaf) -or
-        (Test-Path -LiteralPath $branch -PathType Leaf) -or
-        (Test-Path -LiteralPath $beat -PathType Leaf)) {
-      [pscustomobject]@{ Path = $candidate; Latest = if (Test-Path -LiteralPath $beat) { (Get-Item -LiteralPath $beat).LastWriteTime } else { [DateTime]::MinValue } }
+  $candidates = @($candidates | Where-Object { $_ } | Select-Object -Unique)
+  # Ask the running Matcha to create a unique marker through its own sandbox.
+  # Only the directory containing that exact token is verified; never write a fake heartbeat.
+  $token = [Guid]::NewGuid().ToString('N')
+  $relative = "aotr/watchdog-probe-$token.txt"
+  $lua = 'if not isfolder("aotr") then makefolder("aotr") end; writefile("' + $relative + '", "' + $token + '"); print("watchdog workspace probe written")'
+  $probeSucceeded = $false
+  try {
+    $body = @{ jsonrpc = '2.0'; id = 1; method = 'tools/call'; params = @{ name = 'matcha_exec'; arguments = @{ code = $lua } } } | ConvertTo-Json -Depth 6 -Compress
+    $response = Invoke-RestMethod -Uri $McpUrl -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 3 -ErrorAction Stop
+    if ($response.result -and -not $response.result.isError) {
+      $probeSucceeded = (($response.result.content | ForEach-Object { $_.text }) -join '') -match 'watchdog workspace probe written'
     }
+    foreach ($candidate in $candidates) {
+      $marker = Join-Path $candidate $relative
+      if ((Test-Path -LiteralPath $marker -PathType Leaf) -and
+          (Get-Content -LiteralPath $marker -Raw -ErrorAction SilentlyContinue) -eq $token) {
+        $verified = (Resolve-Path -LiteralPath $candidate).Path
+        if ($explicit -and (Resolve-Path -LiteralPath $explicit).Path -ne $verified) {
+          throw "The specified workspace '$explicit' differs from Matcha's verified workspace '$verified'. Remove the override."
+        }
+        $script:WorkspaceVerification = 'Verified through Matcha file API'
+        return $verified
+      }
+    }
+  } catch {
+    if ($_.Exception.Message -like 'The specified workspace*') { throw }
+    # Matcha may be closed, loading, or have MCP disabled. Use its documented default below.
+  } finally {
+    # Remove only our unique probe, through the same API that wrote it.
+    try {
+      $cleanup = @{ jsonrpc = '2.0'; id = 2; method = 'tools/call'; params = @{ name = 'matcha_exec'; arguments = @{ code = 'if isfile("' + $relative + '") then delfile("' + $relative + '") end' } } } | ConvertTo-Json -Depth 6 -Compress
+      Invoke-RestMethod -Uri $McpUrl -Method Post -ContentType 'application/json' -Body $cleanup -TimeoutSec 3 -ErrorAction Stop | Out-Null
+    } catch {}
   }
-  $best = $found | Sort-Object Latest -Descending | Select-Object -First 1
-  if ($best) { return (Resolve-Path -LiteralPath $best.Path).Path }
-  throw 'AoTR workspace not found. Pass -WorkspaceRoot <Matcha workspace directory>.'
+  if ($probeSucceeded) {
+    throw "Matcha wrote a workspace probe outside the known folders. Pass -WorkspaceRoot <Matcha's actual workspace> and run again."
+  }
+  $fallback = if ($explicit) { $explicit } else { $standardWorkspace }
+  $script:WorkspaceVerification = 'MCP unavailable; awaiting farm heartbeat'
+  try {
+    New-Item -ItemType Directory -Path $fallback -Force -ErrorAction Stop | Out-Null
+    return (Resolve-Path -LiteralPath $fallback).Path
+  } catch {
+    throw "Cannot create Matcha workspace '$fallback': $($_.Exception.Message)"
+  }
 }
+
 
 $MatchaExe = Find-MatchaExe
 $WorkspaceRoot = Find-WorkspaceRoot
@@ -122,7 +267,13 @@ $aotrDir = Join-Path $WorkspaceRoot 'aotr'
 if (-not $Heartbeat) { $Heartbeat = Join-Path $aotrDir 'heartbeat.txt' }
 if (-not $Log) { $Log = Join-Path $aotrDir 'watchdog.txt' }
 if (-not $BootLog) { $BootLog = Join-Path $aotrDir 'boot.txt' }
+New-Item -ItemType Directory -Path $aotrDir -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path -Parent $Log) -Force | Out-Null
+if ($ShowWorkspace) {
+  Write-Host "Matcha workspace: $WorkspaceRoot ($script:WorkspaceVerification)"
+  Start-Process -FilePath explorer.exe -ArgumentList ('"{0}"' -f $WorkspaceRoot)
+  return
+}
 
 Add-Type @"
 using System;
@@ -257,6 +408,7 @@ if ($ValidateOnly) {
   [pscustomobject]@{
     MatchaExe = $MatchaExe
     WorkspaceRoot = $WorkspaceRoot
+    WorkspaceVerification = $script:WorkspaceVerification
     Heartbeat = $Heartbeat
     BootLog = $BootLog
     Log = $Log
@@ -278,6 +430,12 @@ function Press-Retry {
 Write-Log ("watchdog started (stale {0}s, cooldown {1}s{2})" -f $StaleSeconds, $CooldownSeconds, $(if ($DryRun) { ", dry run" } else { "" }))
 Write-Log ("auto-discovered Matcha={0}; workspace={1}; farm sources={2}" -f $MatchaExe, $WorkspaceRoot, $(if ($farmSources.Count) { $farmSources -join ', ' } else { '(none)' }))
 if ($TryScriptRestart -and -not $StartFarmLua) { Write-Log 'farm source not found; script restart disabled (Matcha restart and Retry remain available)' }
+Write-Host "Matcha: $MatchaExe"
+Write-Host "Workspace: $WorkspaceRoot ($script:WorkspaceVerification)"
+Write-Host "Heartbeat: $Heartbeat"
+Write-Host 'Leave this window running. Workspace path shown above. Stop with Ctrl+C.'
+$heartbeatSeen = Test-Path -LiteralPath $Heartbeat -PathType Leaf
+if (-not $heartbeatSeen) { Write-Host 'Waiting for the farm to write its first heartbeat; farm-stall recovery is paused.' }
 $lastAction = [DateTime]::MinValue
 $attempts = 0
 $retriesSinceMatcha = $null # null until the first Matcha restart of a stall
@@ -382,6 +540,18 @@ while ($true) {
   }
   $hungSince = $null
 
+  if (-not $heartbeatSeen) {
+    if (Test-Path -LiteralPath $Heartbeat -PathType Leaf) {
+      $heartbeatSeen = $true
+      $jobSince = Get-Date
+      $lastAction = Get-Date
+      Write-Log 'first farm heartbeat found; farm-stall recovery enabled'
+    } else {
+      if ($lastReported -ne 'waitingforfarm') { Write-Log "waiting for the farm to write $Heartbeat; farm-stall recovery paused"; $lastReported = 'waitingforfarm' }
+      continue
+    }
+  }
+
   # An overlay left open (or reopened) blocks the farm's input; close it once it has stayed open
   # OverlaySeconds, which leaves time to use the menu by hand.
   if ($matcha.MainWindowHandle -ne [IntPtr]::Zero -and (Test-OverlayOpen $matcha)) {
@@ -412,14 +582,6 @@ while ($true) {
   # two fast restarts that did not bring the beat back (e.g. back in the lobby, where the farm does
   # not run), fall through to the MCP-aware handling below.
   if ($RestartMatcha -and $state -eq "farming" -and $age -ge $FastStaleSeconds -and $attempts -lt 2 -and ((Get-Date) - $lastAction).TotalSeconds -ge $CooldownSeconds) {
-    # An old mission heartbeat can remain after teleporting to the lobby. Check the live place
-    # before taking the fast restart path, otherwise Matcha restarts repeatedly in the lobby.
-    $fastStatus = Invoke-Matcha "matcha_status" @{}
-    if ($fastStatus -and [string][int64]$fastStatus.place_id -eq $LobbyPlaceId) {
-      if ($lastReported -ne "lobby") { Write-Log "in the lobby, standing down"; $lastReported = "lobby" }
-      $attempts = 0
-      continue
-    }
     $lastAction = Get-Date; $attempts++; $retriesSinceMatcha = 0; $lastReported = "stale"
     if ($DryRun) { Write-Log ("farm heartbeat {0:N0}s old - would restart Matcha (attempt {1})" -f $age, $attempts); continue }
     Write-Log ("farm heartbeat {0:N0}s old - restarting Matcha (attempt {1})" -f $age, $attempts)
