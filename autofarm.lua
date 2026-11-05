@@ -485,7 +485,7 @@ end
 
 local function GetOffsets(): OffsetsData?
   local ok, res = pcall(function()
-    return game:HttpGet("https://imtheo.lol/Offsets/Offsets.json")
+    return httpget("https://offsets.imtheo.lol/Offsets/Offsets.json")
   end)
 
   local decoded = ok and DecodeOffsets(res) or nil
