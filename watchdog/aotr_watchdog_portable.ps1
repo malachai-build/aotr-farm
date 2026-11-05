@@ -412,6 +412,14 @@ while ($true) {
   # two fast restarts that did not bring the beat back (e.g. back in the lobby, where the farm does
   # not run), fall through to the MCP-aware handling below.
   if ($RestartMatcha -and $state -eq "farming" -and $age -ge $FastStaleSeconds -and $attempts -lt 2 -and ((Get-Date) - $lastAction).TotalSeconds -ge $CooldownSeconds) {
+    # An old mission heartbeat can remain after teleporting to the lobby. Check the live place
+    # before taking the fast restart path, otherwise Matcha restarts repeatedly in the lobby.
+    $fastStatus = Invoke-Matcha "matcha_status" @{}
+    if ($fastStatus -and [string][int64]$fastStatus.place_id -eq $LobbyPlaceId) {
+      if ($lastReported -ne "lobby") { Write-Log "in the lobby, standing down"; $lastReported = "lobby" }
+      $attempts = 0
+      continue
+    }
     $lastAction = Get-Date; $attempts++; $retriesSinceMatcha = 0; $lastReported = "stale"
     if ($DryRun) { Write-Log ("farm heartbeat {0:N0}s old - would restart Matcha (attempt {1})" -f $age, $attempts); continue }
     Write-Log ("farm heartbeat {0:N0}s old - restarting Matcha (attempt {1})" -f $age, $attempts)
