@@ -9,7 +9,7 @@ end
 if game.PlaceId ~= 14638336319 then return end
 if not isfolder("aotr") then makefolder("aotr") end
 
-local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/41c0a0c969e2ec6337abad7e8516566a121916f3/autofarm_normal.lua")
+local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/fc7495c27d19d3132b1b9e5a770c8d7096075282/autofarm_normal.lua")
 if type(source) ~= "string" or #source < 100000 then
   warn("[AoTR Normal] source download failed")
   return
