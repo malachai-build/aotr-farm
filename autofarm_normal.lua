@@ -1721,6 +1721,21 @@ end
 
 -- Character state is sampled at startup and continuously; damage invalidates cached parts.
 -- Do not fight a grab/ragdoll by teleporting its root. Give the game time to restore control.
+-- Read the actual native humanoid state using this client's loaded offsets.
+-- The character's Ragdoll attribute is not sufficient evidence of an active ragdoll.
+function Recovery.ReadState(humanoid)
+  local fields = Offsets.Humanoid
+  if not humanoid or not fields or type(fields.HumanoidState) ~= "number"
+    or type(fields.HumanoidStateID) ~= "number" then return nil end
+  local ok, value = pcall(function()
+    local pointer = memory_read("uintptr_t", humanoid.Address + fields.HumanoidState)
+    if type(pointer) ~= "number" or pointer < 65536 or pointer >= 140737488355328 then return nil end
+    local state = memory_read("int", pointer + fields.HumanoidStateID)
+    if type(state) == "number" and state >= 0 and state <= 18 then return state end
+  end)
+  return ok and value or nil
+end
+
 function Recovery.Tick()
   local now = os.clock()
   if Recovery.ReleaseAt and now >= Recovery.ReleaseAt then
@@ -1745,6 +1760,8 @@ function Recovery.Tick()
     Recovery.Since, Recovery.StableAt, Recovery.Braked = nil, nil, false
   end
   Recovery.Character, Recovery.Hp = address, hp
+  local nativeState = Recovery.ReadState(humanoid)
+  Recovery.NativeState = nativeState
   local reason
   if not character or not character.Parent or not root or not root.Parent or type(hp) ~= "number" then
     reason = "waiting for character"
@@ -1754,7 +1771,7 @@ function Recovery.Tick()
     reason = "incomplete character body"
   elseif Qte.Active then
     reason = "escape / quick time event"
-  elseif character:GetAttribute("Ragdoll") == true then
+  elseif nativeState == 0 or nativeState == 1 or nativeState == 2 or nativeState == 14 then
     reason = "ragdoll"
   end
   if reason then

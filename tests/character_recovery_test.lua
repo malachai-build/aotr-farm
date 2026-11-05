@@ -24,12 +24,12 @@ local CurrentTitanTarget={}
 local LastProgress=0
 local TitanForm=false
 local Vector3Zero=Vector3.new(0,0,0)
-local Recovery={Blocked=true,CheckedAt=-math.huge,Braked=false}
+local Recovery={Blocked=true,CheckedAt=-math.huge,Braked=false,ReadState=function(h) return h and h.State end}
 local function GetHumanoid(c) return c.hum end
 local function GetHrp(c) return c.root end
 local function body(id)
   local c={Address=id,Parent=true,Ragdoll=false,parts={Head={},UpperTorso={}}}
-  c.hum={Health=100,Parent=c}; c.root={Parent=c,AssemblyLinearVelocity=Vector3.new(0,-400,0)}
+  c.hum={Health=100,Parent=c,State=8}; c.root={Parent=c,AssemblyLinearVelocity=Vector3.new(0,-400,0)}
   function c:FindFirstChild(n) return self.parts[n] end
   function c:GetAttribute(n) return self[n] end
   return c
@@ -41,7 +41,7 @@ local function tick(t) now=t; Recovery.Tick() end
 tick(0); assert(Recovery.Blocked,"startup must validate before combat")
 tick(0.5); assert(not Recovery.Blocked,"healthy startup resumes")
 beats={}; CharacterCache[1].Hrp={old=true}; CharacterCache[1].Humanoid={old=true}
-c.hum.Health=90; c.Ragdoll=true; tick(0.8)
+c.hum.Health=90; c.Ragdoll=true; c.hum.State=1; tick(0.8)
 assert(Recovery.Blocked and Recovery.Reason=="ragdoll","HP drop/ragdoll interrupts combat")
 assert(CharacterCache[1].Hrp==nil and CharacterCache[1].Humanoid==nil,"damage clears stale part cache")
 assert(CurrentTitanTarget==nil and FarmStats.Target=="none","recovery drops target")
@@ -50,7 +50,7 @@ assert(c.root.AssemblyLinearVelocity.Magnitude==0,"ragdoll braking")
 c.root.AssemblyLinearVelocity=Vector3.new(0,-123,0); tick(1.1)
 assert(c.root.AssemblyLinearVelocity.Y==-123,"do not brake every tick")
 assert(#beats==1,"do not refresh recovery timer")
-c.Ragdoll=false; tick(1.4); assert(Recovery.Blocked,"debounce recovery")
+c.Ragdoll=false; c.hum.State=8; tick(1.4); assert(Recovery.Blocked,"debounce recovery")
 tick(1.9); assert(not Recovery.Blocked and beats[2]=="farming","resume after game clears ragdoll")
 assert(#presses==1 and presses[1]==0x20,"one normal jump after recovery")
 tick(2.0); assert(#releases==1 and releases[1]==0x20,"release jump without waiting for next sample")
@@ -69,6 +69,9 @@ LocalPlayer.Character=nil; tick(4.8); assert(Recovery.Blocked,"respawn gap block
 c=body(4); c.parts.Head=nil; c.parts.UpperTorso=nil; c.Shifter=true; LocalPlayer.Character=c
 tick(5.1); tick(5.6); assert(not Recovery.Blocked,"shifted form does not require human body parts")
 UserConfigs.Autofarm=false; c.Ragdoll=true; tick(6); assert(not Recovery.Blocked,"manual pause does not request watchdog recovery")
+UserConfigs.Autofarm=true; c=body(5); c.Ragdoll=true; LocalPlayer.Character=c; tick(6.3)
+assert(not Recovery.Blocked,"sticky Ragdoll attribute does not block a healthy native state")
+c.hum.State=nil; tick(6.6); assert(not Recovery.Blocked,"unreadable state does not trust sticky attribute")
 ]====]
   assert(loadstring(header..extract(source,"function Recovery.Tick()","-- End character recovery monitor.")..checks,"recovery_"..variant))()
   print("PASS: "..variant.." damage, ragdoll, missing body, escape ownership, respawn, pause, recovery timer")
