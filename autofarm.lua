@@ -184,7 +184,8 @@ local RunId = tostring(os.clock()) .. "-" .. tostring(math.random(1, 1e9))
 _G.AotrRunId = RunId
 _G.AotrStop = false
 local function Stopped() return _G.AotrStop == true or _G.AotrRunId ~= RunId end
-local FarmStats = { Kills = 0, Timeouts = 0, Target = "none", Status = "starting" }
+local FarmStats = { Kills = 0, Timeouts = 0, Target = "none", Status = "starting",
+  NextMouseNudgeAt = 0, MouseNudgeX = 0, MouseNudgeY = 0 }
 
 
 local CurrentLogFile = nil
@@ -2710,7 +2711,7 @@ local function KillTitan(titan: Instance)
   while true do
     Progress()
     Tr.step("main", "attack delay")
-    task.wait(UserConfigs.AttackDelay)
+    task.wait(math.max(0, UserConfigs.AttackDelay + math.random(-20, 20) / 1000))
     Tr.step("main", "kill checks")
     if Stopped() or not UserConfigs.Autofarm then break end
     if CrateRoute.Pending() then break end
@@ -2774,6 +2775,12 @@ local function KillTitan(titan: Instance)
       task.wait()
       Tr.step("main", "click")
       mouse1click()
+      if os.clock() >= FarmStats.NextMouseNudgeAt then
+        local nextX, nextY = math.random(-5, 5), math.random(-5, 5)
+        mousemoverel(nextX - FarmStats.MouseNudgeX, nextY - FarmStats.MouseNudgeY)
+        FarmStats.MouseNudgeX, FarmStats.MouseNudgeY = nextX, nextY
+        FarmStats.NextMouseNudgeAt = os.clock() + math.random(3, 6)
+      end
       task.wait(0.03)
       Tr.step("main", "space")
       keypress(0x20)
