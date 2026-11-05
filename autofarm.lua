@@ -1895,6 +1895,27 @@ function CrateRoute.ClickButton(Button: Instance, fallbackX: number, fallbackY: 
   mouse1click()
 end
 
+function CrateRoute.ClickKeyChest(Button: Instance): boolean
+  local Position = Button.AbsolutePosition
+  local Viewport = Workspace.CurrentCamera.ViewportSize
+  -- Verified on the live Premium OPEN button: move to (1792,1008), nudge, then
+  -- wait for the cursor to settle before sending a separate click.
+  local x = math.floor(Position.X + Viewport.X * 0.04)
+  local y = math.floor(Position.Y + Viewport.Y * 0.0175)
+  mousemoveabs(x, y)
+  mousemoverel(1, 0)
+  local mouse = LocalPlayer:GetMouse()
+  local deadline = os.clock() + 1.5
+  while os.clock() < deadline and (math.abs(mouse.X - x) > 6 or math.abs(mouse.Y - y) > 6) do
+    task.wait(0.05)
+  end
+  if math.abs(mouse.X - x) > 6 or math.abs(mouse.Y - y) > 6 then return false end
+  task.wait(0.4)
+  if not isrbxactive() or math.abs(mouse.X - x) > 6 or math.abs(mouse.Y - y) > 6 then return false end
+  mouse1click()
+  return true
+end
+
 -- The raid ends at Interface.Chests before the usual Rewards screen. Matcha reads these
 -- buttons' AbsolutePosition but reports zero AbsoluteSize, so the hover samples supply
 -- viewport-scaled click offsets. The free button disappears once its chest opens.
@@ -1949,12 +1970,14 @@ function CrateRoute.HandleRaidChest(): boolean
       Boot("key chest skipped: no keys shown")
     elseif not CrateRoute.RaidKeyChestDone and premium and title and keys and keys > 0 and string.find(string.upper(label), "OPEN", 1, true) then
       FarmStats.Status = "opening key chest"
-      CrateRoute.RaidKeyChestCount = keys
-      Boot("key chest click attempt: " .. label)
-      -- Live hover: (1792,1008) from Premium.AbsolutePosition (1689.6,982.8)
-      -- at 2560x1440. Matcha reports zero AbsoluteSize for this button.
-      CrateRoute.ClickButton(premium, 0.04, 0.0175)
-      task.wait(1)
+      if CrateRoute.ClickKeyChest(premium) then
+        CrateRoute.RaidKeyChestCount = keys
+        Boot("key chest click attempt: " .. label)
+        task.wait(1)
+      else
+        Boot("key chest pointer did not settle; retrying move")
+        task.wait(0.3)
+      end
     elseif not CrateRoute.RaidKeyChestDone then
       FarmStats.Status = "waiting for key chest OPEN"
       task.wait(0.3)
