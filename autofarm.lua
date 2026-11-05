@@ -127,15 +127,7 @@ local UserConfigs = {
   HoverOffsetZ = 0,
   NapeOffsetY = 2,        -- studs; pulled napes sit this far above the player
   SafeHeight = 9999,      -- Y of the reload spot
-  ShiftEnabled = false,   -- press the titan shifting skill when its Shift Bar can be full
-  ShiftKey = 1,           -- hotbar slot (key 1-5) the shifting skill is bound to
   HumanSkills = true,     -- use ready human hotbar skills, six seconds apart
-  TitanSkills = true,     -- use the five titan skills while shifted
-  TitanSkillDelay = 0.8,  -- seconds between titan skill presses (the game enforces cooldowns)
-  TitanStrikeDistance = 18, -- studs from the struck part (nape, or a boss's marked limb) that the titan form stands
-  TitanRetreatHp = 0.35,  -- fraction of titan health below which the titan form backs off to the hover
-  TitanReturnHp = 0.8,    -- fraction it must heal back to before striking again
-  TitanKillTimeout = 25,  -- seconds before giving up on a titan while shifted
   NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
   BossNoKillMinutes = 20, -- the same while a raid boss is alive (bosses never time out)
   AutoQTE = true,         -- press the key a raid quick time event asks for
@@ -146,7 +138,7 @@ local SAVED_KEYS = {
   "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
-  "ShiftEnabled", "ShiftKey", "HumanSkills", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
+  "HumanSkills",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -179,6 +171,7 @@ do
   end
   UserConfigs.PriorityPerks = cleaned
 end
+SaveSettings() -- discard retired controls from older saved settings
 
 -- Stop switch: `_G.AotrStop = true` (or the menu's Unload) halts every loop and the hover teleport.
 -- Each run takes a fresh id, so re-running (auto-exec, then by hand) stops the old copy, and the
@@ -187,7 +180,7 @@ local RunId = tostring(os.clock()) .. "-" .. tostring(math.random(1, 1e9))
 _G.AotrRunId = RunId
 _G.AotrStop = false
 local function Stopped() return _G.AotrStop == true or _G.AotrRunId ~= RunId end
-local FarmStats = { Kills = 0, Timeouts = 0, Shifts = 0, Target = "none", Status = "starting" }
+local FarmStats = { Kills = 0, Timeouts = 0, Target = "none", Status = "starting" }
 
 
 local CurrentLogFile = nil
@@ -552,8 +545,6 @@ local LastBladeCheck: number = 0
 
 local CurrentRobloxState = "Active"
 local WhatShouldIBeDoing = "attack"
-local TitanForm = false -- shifted into a titan; set by IsTitanForm, read by the hover and nape pull
-local LastShiftBurstAt = -math.huge -- end of the last shift key burst; the refill waits for it to settle
 
 local ReloadingBlades: boolean = false
 local LastReloadingTime: number = 0
@@ -993,9 +984,6 @@ local function GetNearestTitan(): Instance?
       continue
     end
 
-    -- Our own titan, if the game files it under workspace.Titans, sits on our position.
-    if TitanForm and Distance < 3 then continue end
-
     if Distance < NearestDistance then
       NearestDistance = Distance
       NearestTitan = titan
@@ -1015,49 +1003,6 @@ local function TpAboveTitan(titan): boolean -- This might require changes!
   local TitanCache = TitansCache[titan.Address]; if not TitanCache then return false end
   local LocalPlayerCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCache then return false end
   local Hrp = GetPlayerHrp(LocalPlayer); if not Hrp then return false end
-  if TitanForm and not IsBossTitan(titan) then
-    -- Punches only count when the titan's own body reaches the part. From the hover (~200 studs up)
-    -- nothing landed, and a pulled part snaps straight back: each Hitboxes.Hit part is welded to
-    -- its titan. Seen 2026-11-02 in the Female Titan raid (boss bar = Interface.Raids.Health
-    -- Percentage; its Humanoid always reads 100): standing TitanStrikeDistance from the marked limb
-    -- at its height, the bar held at 99.8% for 10s without clicks and fell to 97.1% in 17s with them.
-    -- The boss hits back hard there: 585 hp gone in ~45s, then the run was lost (2026-11-02). So
-    -- below TitanRetreatHp of max health the titan backs off to the old hover (it lasted full 95s
-    -- forms up there) and comes back once it has healed past TitanReturnHp.
-    -- KillTitan picks the part (GetPath yields).
-    local Strike = TitanCache.Info.Strike; if not Strike or not Strike.Parent then return false end
-    local TitanHrp = GetTitanHrp(titan); if not TitanHrp then return false end
-    local Humanoid = GetPlayerHumanoid(LocalPlayer)
-    local hpOk, hp, maxHp = pcall(function() return Humanoid.Health, Humanoid.MaxHealth end)
-    if hpOk and type(hp) == "number" and type(maxHp) == "number" and maxHp > 0 then
-      local Was = LocalPlayerCache.TitanRetreat == true
-      local Retreat = Was
-      if not Was and hp < maxHp * UserConfigs.TitanRetreatHp then Retreat = true
-      elseif Was and hp > maxHp * UserConfigs.TitanReturnHp then Retreat = false end
-      if Retreat ~= Was then
-        Boot(string.format("titan %s at %.0f/%.0f hp", Retreat and "backs off" or "returns to strike", hp, maxHp))
-      end
-      LocalPlayerCache.TitanRetreat = Retreat
-    end
-    local tp, sp, mp = TitanHrp.Position, Strike.Position, Hrp.Position
-    local away = Vector3New(mp.X - tp.X, 0, mp.Z - tp.Z) -- stay on our side of the titan
-    away = away.Magnitude > 1 and away.Unit or Vector3New(1, 0, 0)
-    local stand = sp + away * UserConfigs.TitanStrikeDistance
-    local face = Vector3New(sp.X, stand.Y, sp.Z)
-    if LocalPlayerCache.TitanRetreat then
-      local hx, hy, hz = GetHoverPoint(titan); if not hx then return false end
-      stand = Vector3New(hx, hy, hz) + away * UserConfigs.TitanStrikeDistance
-      face = Vector3New(tp.X, stand.Y, tp.Z)
-    end
-    HeavyWrites += 2
-    local ok, err = pcall(function()
-      Hrp.CFrame = CFrame.lookAt(stand, face)
-      Hrp.AssemblyLinearVelocity = Vector3Zero
-    end)
-    if not ok then DebugPrint("warn", 0, nil, nil, "Error happened while placing the titan form: " .. tostring(err)) end
-    return ok
-  end
-
   local x, y, z = GetHoverPoint(titan); if not x then return false end
 
   local BobOffset = math.sin(os.clock() * math.pi * 2) * UserConfigs.BobAmplitude
@@ -1285,7 +1230,6 @@ end
 
 
 local function HandleAllReloads()
-  if TitanForm then return end -- a titan has no blades or gas; the HUD reads empty and the refill never ends
   if not AreBladesFullyBroken() then return end
 
   local LocalPlayerCharacterCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCharacterCache then return end
@@ -1303,9 +1247,6 @@ local function HandleAllReloads()
       Progress()
       RefillLastSeen = os.clock()
       if not DoINeedToRefill() then RefillStuckSince = nil; WhatShouldIBeDoing = "attack"; break end
-      -- Shifting mid-refill left the titan hanging at the reload spot (2026-11-02): drop the refill.
-      local okShift, Shifter = pcall(function() return LocalPlayer.Character:GetAttribute("Shifter") end)
-      if TitanForm or (okShift and Shifter ~= nil) then RefillStuckSince = nil; WhatShouldIBeDoing = "attack"; break end
       if os.clock() - RefillStuckSince > REFILL_STUCK_LIMIT then GiveUpToTitan(); return end
       if IsReloadingBlades() then
         task.wait(0.5)
@@ -1319,8 +1260,6 @@ local function HandleAllReloads()
       end
 
       if GasTankPosition then
-        -- A shift burst's key spam right before kept R from refilling; let it settle first.
-        if os.clock() - LastShiftBurstAt < 5 then task.wait(0.5); continue end
         Hrp.AssemblyLinearVelocity = Vector3Zero
         task.wait(0.24)
 
@@ -1495,25 +1434,7 @@ end
 
 
 
---#region -- Titan shifting --
--- The shifting skill sits in hotbar slot UserConfigs.ShiftKey (key 1-5). Its Shift Bar is the
--- player's "Bar" attribute out of "Max_Bar" (100): it fills while dealing damage (0 -> 23 in 20s on
--- the Female Titan raid, 2026-11-02) and can run past the max. A press with a full bar plays a short
--- cutscene; as a titan the bar drains, and at 0 the player jumps out and is human again. The titan
--- skills take over the same HUD hotbar (Top.7.Hotbar, keys 1-5; ReplicatedStorage.Modules.Waves.Hotbar).
--- The game's own check for titan form is a "Shifter" attribute on its cached character, which may be
--- the titan model rather than LocalPlayer.Character, so a draining bar counts as titan form too.
--- The first shifts are traced to boot.txt, since the transformation itself has not been watched yet.
-local SHIFT_PRESS_INTERVAL = 3 -- seconds between shift key presses while the bar is full
-local SHIFT_CUTSCENE = 2       -- seconds after turning into a titan before attacking (4 stood ~2s too long)
-local SHIFT_TRACE_TIME = 40    -- seconds of boot.txt trace after each of the first shift presses
-local TitanFormSince = 0
-local LastFormCheck, LastShiftPress, ShiftPresses = 0, 0, 0
-local LastBar, LastBarDropAt = nil, -math.huge
-local ShiftTraceUntil, LastShiftTrace = 0, 0
-local TitanSkillKeys: { number } = {}
-local TitanSkillIndex, LastTitanSkill = 0, 0
-
+--#region -- Human skills --
 local function TapKey(vk: number)
   keypress(vk)
   task.wait(0.03)
@@ -1530,144 +1451,34 @@ local function KeyToVk(text: string?): number?
   return nil
 end
 
--- The hotbar's Key labels (the titan skills use the same slots), falling back to 1-5.
-local function ReadTitanSkillKeys(): string
-  local texts = {}
-  for i = 1, 5 do
-    local label = GetPath(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. i, "Key", "Key") :: TextLabel?
-    local text = label and label.Text
-    texts[i] = tostring(text)
-    TitanSkillKeys[i] = KeyToVk(text) or (0x30 + i)
-  end
-  return table.concat(texts, ",")
-end
-
-local function GetShiftBar(): (number?, number)
-  local ok, bar, max = pcall(function() return LocalPlayer:GetAttribute("Bar"), LocalPlayer:GetAttribute("Max_Bar") end)
-  if not ok then return nil, 100 end
-  return tonumber(bar), tonumber(max) or 100
-end
-
-local function CharacterShifterAttribute(): any
-  local ok, value = pcall(function()
-    local c = LocalPlayer.Character
-    return c and c:GetAttribute("Shifter")
-  end)
-  return ok and value or nil
-end
-
-local function ShiftTrace(why: string)
-  pcall(function()
-    local c = LocalPlayer.Character
-    local hrp = GetPlayerHrp(LocalPlayer)
-    local bar, max = GetShiftBar()
-    Boot(string.format("shift trace (%s): bar=%s/%s shiftAttr=%s charShifter=%s char=%s parts=%d hrpSize=%s y=%s titanForm=%s",
-      why, bar and string.format("%.1f", bar) or "?", tostring(max), tostring(LocalPlayer:GetAttribute("Shift")),
-      tostring(CharacterShifterAttribute()), c and c.Name or "nil", c and #c:GetChildren() or 0,
-      hrp and tostring(hrp.Size) or "?", hrp and string.format("%.0f", hrp.Position.Y) or "?", tostring(TitanForm)))
-  end)
-end
-
--- Polled at most 4 times a second from the farm threads (GetPath yields; never the hover).
-local function IsTitanForm(): boolean
-  local now = os.clock()
-  if now - LastFormCheck < 0.25 then return TitanForm end
-  LastFormCheck = now
-  local bar = GetShiftBar()
-  if bar and LastBar and bar < LastBar - 0.01 then LastBarDropAt = now end
-  LastBar = bar
-  local Shifted = CharacterShifterAttribute() ~= nil or (now - LastBarDropAt < 1.5 and (bar or 0) > 0)
-  if now < ShiftTraceUntil and now - LastShiftTrace >= 2 then LastShiftTrace = now; ShiftTrace("after press") end
-  if Shifted ~= TitanForm then
-    TitanForm = Shifted
-    if Shifted then
-      TitanFormSince = now
-      if WhatShouldIBeDoing == "refill" then WhatShouldIBeDoing = "attack" end -- the hover only runs while attacking
-      FarmStats.Shifts += 1
-      Boot(string.format("titan form (%.1fs after shift press %d), hotbar keys %s", now - LastShiftPress, ShiftPresses, ReadTitanSkillKeys()))
-    else
-      Boot(string.format("human form after %.0fs as a titan", now - TitanFormSince))
-    end
-    ShiftTrace(Shifted and "became titan" or "became human")
-  end
-  return TitanForm
-end
-
--- Blade swings block skills, so one press mid-slash does nothing (user, 2026-11-02: it took rapid
--- presses landing in the gaps between swings). With a full bar, stop slashing and spam the key
--- until the bar starts draining or the character turns, for at most SHIFT_BURST seconds.
-local SHIFT_BURST = 3
-local function TryShift()
-  if not UserConfigs.ShiftEnabled or TitanForm then return end
-  if CurrentTitanTarget and IsBossTitan(CurrentTitanTarget) then return end
-  if os.clock() - LastShiftPress < SHIFT_PRESS_INTERVAL then return end
-  -- The 1 spam broke a refill (user, 2026-11-02): never burst while a refill is running. Being out
-  -- of supplies no longer blocks it: with 0/3 sets and 0% gas but blades still in hand, no refill
-  -- starts, and a full bar sat unused (seen 2026-11-02). A refill stuck for 5s does not block it
-  -- either; the refill loop drops itself once the character shifts.
-  local now0 = os.clock()
-  local Refilling = now0 - RefillLastSeen < 1 and RefillStuckSince ~= nil and now0 - RefillStuckSince < 5
-  if WhatShouldIBeDoing ~= "attack" or ReloadingBlades or Refilling then return end
-  local bar, max = GetShiftBar()
-  if not bar or bar < max then return end
-  ShiftPresses += 1
-  local slot = math.clamp(math.floor(UserConfigs.ShiftKey), 1, 5)
-  if ShiftPresses <= 3 then ShiftTraceUntil = os.clock() + SHIFT_TRACE_TIME end
-  local started, taps = os.clock(), 0
-  repeat
-    Progress()
-    TapKey(0x30 + slot)
-    taps += 1
-    task.wait(0.07)
-    local now = GetShiftBar()
-  until os.clock() - started > SHIFT_BURST or CharacterShifterAttribute() ~= nil or (now and now < bar - 0.01) or Stopped()
-  LastShiftPress = os.clock()
-  LastShiftBurstAt = LastShiftPress
-  local after = GetShiftBar()
-  if ShiftPresses <= 5 then
-    Boot(string.format("shift burst %d: key %d x%d in %.1fs, bar %.0f -> %s/%d", ShiftPresses, slot, taps, os.clock() - started, bar,
-      after and string.format("%.0f", after) or "?", max))
-  end
-end
-
--- One titan skill per TitanSkillDelay, in turn; the game ignores presses still on cooldown.
-local function UseTitanSkill()
-  if not UserConfigs.TitanSkills or os.clock() - LastTitanSkill < UserConfigs.TitanSkillDelay then return end
-  if #TitanSkillKeys == 0 then ReadTitanSkillKeys() end
-  LastTitanSkill = os.clock()
-  TitanSkillIndex = TitanSkillIndex % #TitanSkillKeys + 1
-  TapKey(TitanSkillKeys[TitanSkillIndex])
-end
-
--- The human hotbar shows a countdown on each skill. Keep the shifting slot out of this
--- rotation and leave six seconds between presses so one animation can finish before the next.
-Stats.HumanSkills = { LastPress = -math.huge, NextSlot = 1, ReadyAt = {} }
+-- The human hotbar shows a countdown on each skill. Slot 1 is reserved; use slots 2-5
+-- with six seconds between presses so one animation can finish before the next.
+Stats.HumanSkills = { LastPress = -math.huge, LastCheck = -math.huge, NextSlot = 2, ReadyAt = {} }
 function Stats.UseHumanSkill(): boolean
-  if not UserConfigs.HumanSkills or TitanForm then return false end
+  if not UserConfigs.HumanSkills then return false end
   local state = Stats.HumanSkills
   local now = os.clock()
-  if now - state.LastPress < 6 then return false end
-  for offset = 0, 4 do
-    local slot = (state.NextSlot + offset - 1) % 5 + 1
-    if slot ~= math.clamp(math.floor(UserConfigs.ShiftKey), 1, 5) then
-      local skill = GetPath(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
-      local cooldown = skill and GetPath(skill, false, "Cooldown", "Label") :: TextLabel?
-      local text = cooldown and cooldown.Text
-      local seconds = type(text) == "string" and tonumber(string.match(text, "[%d%.]+")) or nil
-      if seconds then
-        if seconds > 1 then
-          state.ReadyAt[slot] = math.min(state.ReadyAt[slot] or math.huge, now + seconds)
-        elseif now >= (state.ReadyAt[slot] or 0) then
-          local key = GetPath(skill, false, "Key", "Key") :: TextLabel?
-          local vk = KeyToVk(key and key.Text)
-          if vk then
-            state.LastPress = now
-            state.NextSlot = slot % 5 + 1
-            state.ReadyAt[slot] = now + 6
-            TapKey(vk)
-            Boot(string.format("human skill slot %d (cooldown %s)", slot, text))
-            return true
-          end
+  if now - state.LastPress < 6 or now - state.LastCheck < 1 then return false end
+  state.LastCheck = now
+  for offset = 0, 3 do
+    local slot = 2 + (state.NextSlot - 2 + offset) % 4
+    local skill = GetPath(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
+    local cooldown = skill and GetPath(skill, false, "Cooldown", "Label") :: TextLabel?
+    local text = cooldown and cooldown.Text
+    local seconds = type(text) == "string" and tonumber(string.match(text, "[%d%.]+")) or nil
+    if seconds then
+      if seconds > 1 then
+        state.ReadyAt[slot] = math.min(state.ReadyAt[slot] or math.huge, now + seconds)
+      elseif now >= (state.ReadyAt[slot] or 0) then
+        local key = GetPath(skill, false, "Key", "Key") :: TextLabel?
+        local vk = KeyToVk(key and key.Text)
+        if vk then
+          state.LastPress = now
+          state.NextSlot = slot == 5 and 2 or slot + 1
+          state.ReadyAt[slot] = now + 6
+          TapKey(vk)
+          Boot(string.format("human skill slot %d (cooldown %s)", slot, text))
+          return true
         end
       end
     end
@@ -1675,7 +1486,7 @@ function Stats.UseHumanSkill(): boolean
   return false
 end
 
---#endregion -- Titan shifting --
+--#endregion -- Human skills --
 
 
 
@@ -1782,8 +1593,8 @@ local function BlackBoxLine(): string
         if th then NearestTitanDist = math.min(NearestTitanDist, (th.Position - p).Magnitude) end
       end
     end
-    return string.format("%s status=%s kills=%d timeouts=%d form=%s titansAlive=%d nearestTitan=%s target=%s y=%s speed=%s hp=%s targetDist=%s hoverAge=%.1fs doing=%s writes=%.0f/s skipped=%d",
-      os.date("%H:%M:%S"), FarmStats.Status, FarmStats.Kills, FarmStats.Timeouts, TitanForm and "titan" or "human", AliveTitans,
+    return string.format("%s status=%s kills=%d timeouts=%d titansAlive=%d nearestTitan=%s target=%s y=%s speed=%s hp=%s targetDist=%s hoverAge=%.1fs doing=%s writes=%.0f/s skipped=%d",
+      os.date("%H:%M:%S"), FarmStats.Status, FarmStats.Kills, FarmStats.Timeouts, AliveTitans,
       NearestTitanDist < math.huge and string.format("%.0f", NearestTitanDist) or "-", FarmStats.Target,
       p and string.format("%.0f", p.Y) or "?", v and string.format("%.0f", v.Magnitude) or "?",
       type(hp) == "number" and string.format("%.0f", hp) or "?",
@@ -1916,7 +1727,7 @@ function CrateRoute.ResumeSavedWave()
   end
 end
 function CrateRoute.GetOwned(): Instance?
-  if not UserConfigs.AutoCrates or TitanForm then return nil end
+  if not UserConfigs.AutoCrates then return nil end
   local now = os.clock()
   if now < CrateRoute.NextCheck and CrateRoute.Cached and CrateRoute.Cached.Parent then return CrateRoute.Cached end
   if now < CrateRoute.NextCheck then return nil end
@@ -1935,7 +1746,6 @@ end
 
 function CrateRoute.Handle(): boolean
   if not CrateRoute.Pending() then return false end
-  if IsTitanForm() then return false end
   local Crate = CrateRoute.GetOwned(); if not Crate then return false end
   local Hitbox = Crate:FindFirstChild("Hitbox"); if not Hitbox or not Hitbox:IsA("BasePart") then return false end
   local Waves = Workspace:FindFirstChild("Waves")
@@ -2046,7 +1856,7 @@ function CrateRoute.HandleEquipment(): boolean
   if not UserConfigs.AutoEquipmentUpgrades or not CrateRoute.EquipmentPending then return false end
   if UserConfigs.AutoStationUpgrades and CrateRoute.RegenClicks < CrateRoute.RegenPlanned
     and not (CrateRoute.WaveState.Maxed or {}).Regen then return false end
-  if Qte.Active or IsTitanForm() or not isrbxactive() or os.clock() < CrateRoute.NextEquipmentAttempt then return false end
+  if Qte.Active or not isrbxactive() or os.clock() < CrateRoute.NextEquipmentAttempt then return false end
   local Waves = Workspace:FindFirstChild("Waves")
   local NPCs = Waves and Waves:FindFirstChild("NPCs")
   local Lulu = NPCs and NPCs:FindFirstChild("Lulu")
@@ -2151,7 +1961,7 @@ end
 
 function CrateRoute.HandleUpgrade(): boolean
   if not UserConfigs.AutoStationUpgrades or not CrateRoute.UpgradePending then return false end
-  if Qte.Active or IsTitanForm() or not isrbxactive() or os.clock() < CrateRoute.NextUpgradeAttempt then return false end
+  if Qte.Active or not isrbxactive() or os.clock() < CrateRoute.NextUpgradeAttempt then return false end
   local Waves = Workspace:FindFirstChild("Waves")
   local NPCs = Waves and Waves:FindFirstChild("NPCs")
   local Cole = NPCs and NPCs:FindFirstChild("Cole")
@@ -2415,7 +2225,7 @@ function PerkManager.Handle(): boolean
   if not UserConfigs.MenuDisabled and (not UI or not UI.ready) then return false end
   if UserConfigs.AutoMarket and CrateRoute.MarketPending and not PerkManager.SurveyPending then return false end
   if not PerkManager.Pending and os.clock() < PerkManager.NextCheck then return false end
-  if Qte.Active or IsTitanForm() or not isrbxactive() or not IsLocalAlive() then return false end
+  if Qte.Active or not isrbxactive() or not IsLocalAlive() then return false end
   local Equipment = Interface:FindFirstChild("Equipment")
   local Categories = Equipment and Equipment:FindFirstChild("Categories")
   local Category = Categories and Categories:FindFirstChild("Equipment_Perks")
@@ -2567,7 +2377,7 @@ function CrateRoute.MarketManager.Handle(): boolean
   if not UserConfigs.AutoMarket or not UserConfigs.AutoPerks or not CrateRoute.MarketPending then return false end
   if PerkManager.SurveyPending or not PerkManager.Owned then return false end
   if not UserConfigs.MenuDisabled and (not UI or not UI.ready) then return false end
-  if Qte.Active or IsTitanForm() or not isrbxactive() or not IsLocalAlive() or os.clock() < CrateRoute.MarketManager.NextAttempt then return false end
+  if Qte.Active or not isrbxactive() or not IsLocalAlive() or os.clock() < CrateRoute.MarketManager.NextAttempt then return false end
 
   local Waves = Workspace:FindFirstChild("Waves")
   local NPCs = Waves and Waves:FindFirstChild("NPCs")
@@ -2708,10 +2518,9 @@ local function KillTitan(titan: Instance)
       break
     end
     if not IsLocalAlive() then print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
-    local Shifted = IsTitanForm()
-    if not Shifted and AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
+    if AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
     -- No per-titan kill timeout (removed at the user's request, 2026-11-03): the farm stays on a
-    -- target until it dies. KillTimeout/TitanKillTimeout are no longer read. A titan that never
+    -- target until it dies. KillTimeout is no longer read. A titan that never
     -- dies is still caught by NoKillMinutes in the main loop, which resets the run.
 
     Tr.step("main", "kill checks done")
@@ -2744,44 +2553,20 @@ local function KillTitan(titan: Instance)
         task.wait(0.05)
         continue
       end
-      if Shifted and os.clock() - TitanFormSince < SHIFT_CUTSCENE then
-        FarmStats.Status = "shifting"
-        task.wait(0.1)
-        continue
-      end
-      if Shifted then
-        -- No pull as a titan: the part snaps back to its titan, so the hover walks to it instead.
-        Tr.step("main", "titan weak spot")
-        local Cache = TitansCache[TitanAddress]
-        if Cache then Cache.Info.Strike = GetTitanWeakSpot(titan) end
-      else
-        Tr.step("main", "pull napes (write)")
-        PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
-      end
+      Tr.step("main", "pull napes (write)")
+      PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
 
-      if not Shifted and Stats.UseHumanSkill() then
-        FarmStats.Status = "human skill"
-        task.wait(6)
-        continue
-      end
+      Stats.UseHumanSkill()
 
       Tr.step("main", "slash wait")
       task.wait()
       Tr.step("main", "click")
       mouse1click()
       task.wait(0.03)
-      if Shifted then
-        FarmStats.Status = "titan attacking"
-        Tr.step("main", "titan skill")
-        UseTitanSkill()
-      else
-        Tr.step("main", "space")
-        keypress(0x20)
-        task.wait(0.03)
-        keyrelease(0x20)
-        Tr.step("main", "try shift")
-        TryShift()
-      end
+      Tr.step("main", "space")
+      keypress(0x20)
+      task.wait(0.03)
+      keyrelease(0x20)
     end
   end
   -- Drop the target so the hover stops following a dead or abandoned titan.
@@ -2940,7 +2725,7 @@ task.spawn(function() -- The main loop, where the magic happens
     end
 
     Tr.step("main", "blade check")
-    if not IsTitanForm() and AreBladesFullyBroken() then
+    if AreBladesFullyBroken() then
       CurrentTitanTarget = nil
       if UserConfigs.AutoReload then
         FarmStats.Status = "reloading"
@@ -3025,9 +2810,7 @@ local RenderConn
 
 local function HoverStep()
   if not UserConfigs.Autofarm or WhatShouldIBeDoing ~= "attack" then return end
-  -- The reload spot is the skybox (SafeHeight); a titan parked there got stuck (2026-11-02) while
-  -- its bar drained, so in titan form keep hovering over the target, or hold still with none.
-  if CurrentRobloxState == "Inactive" and not TitanForm then
+  if CurrentRobloxState == "Inactive" then
     -- This used to write the CFrame every frame (~60 heavy writes a second) with velocity left to
     -- build (2,800 studs/s seen 2026-11-03). Unfocusing Roblox happens on every watchdog restart,
     -- so it fed the hangs it was restarting for. No clicks land while unfocused, so the slash
@@ -3041,8 +2824,6 @@ local function HoverStep()
     HeavyWrites += 2
     return
   end
-  if TitanForm and not CurrentTitanTarget then return end
-
   if CurrentTitanTarget then
     -- Throttled to HOVER_INTERVAL: a CFrame write every frame was ~60 heavy writes a second, the
     -- likeliest load behind Matcha hanging mid-mission. Velocity still builds between writes.
@@ -3233,27 +3014,9 @@ local function buildMenu()
     Tooltip = "Stack a raid boss's hitbox limbs for each slash; extra damage is unverified",
     Callback = setter("PullBossLimbs") }))
 
-  local shifting = main:AddLeftGroupbox("Titan Shifting")
-  reg("ShiftEnabled", shifting:AddToggle("ShiftEnabled", { Text = "Auto Shift", Default = UserConfigs.ShiftEnabled,
-    Tooltip = "Press the shifting skill when the Shift Bar fills, then fight as the titan",
-    Callback = setter("ShiftEnabled") }))
-  reg("ShiftKey", shifting:AddSlider("ShiftKey", { Text = "Shift Skill Key", Default = UserConfigs.ShiftKey,
-    Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot (key 1-5) the shifting skill is in",
-    Callback = setter("ShiftKey") }))
-  reg("HumanSkills", shifting:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
-    Tooltip = "Use ready non-shift hotbar skills with six seconds between animations", Callback = setter("HumanSkills") }))
-  reg("TitanSkills", shifting:AddToggle("TitanSkills", { Text = "Use Titan Skills", Default = UserConfigs.TitanSkills,
-    Tooltip = "Cycle the five titan skills between punches", Callback = setter("TitanSkills") }))
-  reg("TitanSkillDelay", shifting:AddSlider("TitanSkillDelay", { Text = "Skill Delay", Default = math.floor(UserConfigs.TitanSkillDelay * 1000 + 0.5),
-    Min = 200, Max = 3000, Rounding = 0, Suffix = " ms", Callback = setter("TitanSkillDelay", 1000) }))
-  reg("TitanStrikeDistance", shifting:AddSlider("TitanStrikeDistance", { Text = "Strike Distance", Default = UserConfigs.TitanStrikeDistance,
-    Min = 5, Max = 60, Rounding = 0, Suffix = " studs", Tooltip = "How far from the nape (or a boss's marked limb) your titan stands to punch",
-    Callback = setter("TitanStrikeDistance") }))
-  reg("TitanRetreatHp", shifting:AddSlider("TitanRetreatHp", { Text = "Back Off Below", Default = math.floor(UserConfigs.TitanRetreatHp * 100 + 0.5),
-    Min = 0, Max = 90, Rounding = 0, Suffix = " % hp", Tooltip = "Your titan leaves the target for the hover below this health, and returns at the Return value",
-    Callback = setter("TitanRetreatHp", 100) }))
-  reg("TitanKillTimeout", shifting:AddSlider("TitanKillTimeout", { Text = "Titan Give Up After", Default = UserConfigs.TitanKillTimeout,
-    Min = 5, Max = 60, Rounding = 0, Suffix = "s", Callback = setter("TitanKillTimeout") }))
+  local skills = main:AddLeftGroupbox("Human Skills")
+  reg("HumanSkills", skills:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
+    Tooltip = "Use ready hotbar skills 2-5 with six seconds between presses", Callback = setter("HumanSkills") }))
 
   local perksTab = win:AddTab("Perk Manager")
   local priorityLeft = perksTab:AddLeftGroupbox("Priority Perks 1-3")
@@ -3439,8 +3202,8 @@ StatusTick = function()
   end
   syncControl("Autofarm", UserConfigs.Autofarm)
   if StatusLabel then
-    local Text = string.format("AoTR farm:%s  kills:%d  timeouts:%d  shifts:%d  target:%s  |  %s",
-      UserConfigs.Autofarm and "ON" or "off", FarmStats.Kills, FarmStats.Timeouts, FarmStats.Shifts, FarmStats.Target, FarmStats.Status)
+    local Text = string.format("AoTR farm:%s  kills:%d  timeouts:%d  target:%s  |  %s",
+      UserConfigs.Autofarm and "ON" or "off", FarmStats.Kills, FarmStats.Timeouts, FarmStats.Target, FarmStats.Status)
     if Text ~= LastStatusText then -- a Drawing write per tick otherwise
       LastStatusText = Text
       pcall(function() StatusLabel.Text = Text end)
