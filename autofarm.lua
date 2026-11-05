@@ -129,6 +129,7 @@ local UserConfigs = {
   SafeHeight = 9999,      -- Y of the reload spot
   ShiftEnabled = false,   -- press the titan shifting skill when its Shift Bar can be full
   ShiftKey = 1,           -- hotbar slot (key 1-5) the shifting skill is bound to
+  HumanSkills = true,     -- use ready human hotbar skills, six seconds apart
   TitanSkills = true,     -- use the five titan skills while shifted
   TitanSkillDelay = 0.8,  -- seconds between titan skill presses (the game enforces cooldowns)
   TitanStrikeDistance = 18, -- studs from the struck part (nape, or a boss's marked limb) that the titan form stands
@@ -145,7 +146,7 @@ local SAVED_KEYS = {
   "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
-  "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
+  "ShiftEnabled", "ShiftKey", "HumanSkills", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -1014,7 +1015,7 @@ local function TpAboveTitan(titan): boolean -- This might require changes!
   local TitanCache = TitansCache[titan.Address]; if not TitanCache then return false end
   local LocalPlayerCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCache then return false end
   local Hrp = GetPlayerHrp(LocalPlayer); if not Hrp then return false end
-  if TitanForm then
+  if TitanForm and not IsBossTitan(titan) then
     -- Punches only count when the titan's own body reaches the part. From the hover (~200 studs up)
     -- nothing landed, and a pulled part snaps straight back: each Hitboxes.Hit part is welded to
     -- its titan. Seen 2026-11-02 in the Female Titan raid (boss bar = Interface.Raids.Health
@@ -1598,6 +1599,7 @@ end
 local SHIFT_BURST = 3
 local function TryShift()
   if not UserConfigs.ShiftEnabled or TitanForm then return end
+  if CurrentTitanTarget and IsBossTitan(CurrentTitanTarget) then return end
   if os.clock() - LastShiftPress < SHIFT_PRESS_INTERVAL then return end
   -- The 1 spam broke a refill (user, 2026-11-02): never burst while a refill is running. Being out
   -- of supplies no longer blocks it: with 0/3 sets and 0% gas but blades still in hand, no refill
@@ -1635,6 +1637,42 @@ local function UseTitanSkill()
   LastTitanSkill = os.clock()
   TitanSkillIndex = TitanSkillIndex % #TitanSkillKeys + 1
   TapKey(TitanSkillKeys[TitanSkillIndex])
+end
+
+-- The human hotbar shows a countdown on each skill. Keep the shifting slot out of this
+-- rotation and leave six seconds between presses so one animation can finish before the next.
+Stats.HumanSkills = { LastPress = -math.huge, NextSlot = 1, ReadyAt = {} }
+function Stats.UseHumanSkill(): boolean
+  if not UserConfigs.HumanSkills or TitanForm then return false end
+  local state = Stats.HumanSkills
+  local now = os.clock()
+  if now - state.LastPress < 6 then return false end
+  for offset = 0, 4 do
+    local slot = (state.NextSlot + offset - 1) % 5 + 1
+    if slot ~= math.clamp(math.floor(UserConfigs.ShiftKey), 1, 5) then
+      local skill = GetPath(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
+      local cooldown = skill and GetPath(skill, false, "Cooldown", "Label") :: TextLabel?
+      local text = cooldown and cooldown.Text
+      local seconds = type(text) == "string" and tonumber(string.match(text, "[%d%.]+")) or nil
+      if seconds then
+        if seconds > 1 then
+          state.ReadyAt[slot] = math.min(state.ReadyAt[slot] or math.huge, now + seconds)
+        elseif now >= (state.ReadyAt[slot] or 0) then
+          local key = GetPath(skill, false, "Key", "Key") :: TextLabel?
+          local vk = KeyToVk(key and key.Text)
+          if vk then
+            state.LastPress = now
+            state.NextSlot = slot % 5 + 1
+            state.ReadyAt[slot] = now + 6
+            TapKey(vk)
+            Boot(string.format("human skill slot %d (cooldown %s)", slot, text))
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
 end
 
 --#endregion -- Titan shifting --
@@ -2721,6 +2759,12 @@ local function KillTitan(titan: Instance)
         PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
       end
 
+      if not Shifted and Stats.UseHumanSkill() then
+        FarmStats.Status = "human skill"
+        task.wait(6)
+        continue
+      end
+
       Tr.step("main", "slash wait")
       task.wait()
       Tr.step("main", "click")
@@ -3196,6 +3240,8 @@ local function buildMenu()
   reg("ShiftKey", shifting:AddSlider("ShiftKey", { Text = "Shift Skill Key", Default = UserConfigs.ShiftKey,
     Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot (key 1-5) the shifting skill is in",
     Callback = setter("ShiftKey") }))
+  reg("HumanSkills", shifting:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
+    Tooltip = "Use ready non-shift hotbar skills with six seconds between animations", Callback = setter("HumanSkills") }))
   reg("TitanSkills", shifting:AddToggle("TitanSkills", { Text = "Use Titan Skills", Default = UserConfigs.TitanSkills,
     Tooltip = "Cycle the five titan skills between punches", Callback = setter("TitanSkills") }))
   reg("TitanSkillDelay", shifting:AddSlider("TitanSkillDelay", { Text = "Skill Delay", Default = math.floor(UserConfigs.TitanSkillDelay * 1000 + 0.5),
