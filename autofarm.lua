@@ -185,7 +185,7 @@ _G.AotrRunId = RunId
 _G.AotrStop = false
 local function Stopped() return _G.AotrStop == true or _G.AotrRunId ~= RunId end
 local FarmStats = { Kills = 0, Timeouts = 0, Target = "none", Status = "starting",
-  NextMouseNudgeAt = 0, MouseNudgeX = 0, MouseNudgeY = 0 }
+  NextMouseSweepAt = os.clock() + 4, MouseSweepSide = 0 }
 
 
 local CurrentLogFile = nil
@@ -2775,11 +2775,32 @@ local function KillTitan(titan: Instance)
       task.wait()
       Tr.step("main", "click")
       mouse1click()
-      if os.clock() >= FarmStats.NextMouseNudgeAt then
-        local nextX, nextY = math.random(-5, 5), math.random(-5, 5)
-        mousemoverel(nextX - FarmStats.MouseNudgeX, nextY - FarmStats.MouseNudgeY)
-        FarmStats.MouseNudgeX, FarmStats.MouseNudgeY = nextX, nextY
-        FarmStats.NextMouseNudgeAt = os.clock() + math.random(3, 6)
+      if os.clock() >= FarmStats.NextMouseSweepAt then
+        local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+        if viewport then
+          local mouse = LocalPlayer:GetMouse()
+          local startX, startY = mouse.X, mouse.Y
+          local side = FarmStats.MouseSweepSide
+          local targetX = math.floor(viewport.X * (side == 0 and math.random(72, 86) or math.random(14, 28)) / 100)
+          local targetY = math.floor(viewport.Y * math.random(34, 68) / 100)
+          local bendX = math.floor(viewport.X * math.random(38, 62) / 100)
+          local bendY = math.floor(viewport.Y * math.random(24, 76) / 100)
+          local steps = math.random(8, 12)
+          Tr.step("main", "mouse sweep")
+          for step = 1, steps do
+            if Stopped() or WhatShouldIBeDoing ~= "attack" or Qte.Active or Stats.CutsceneSkip.Visible or not isrbxactive() then break end
+            local t = step / steps
+            local u = 1 - t
+            mousemoveabs(math.floor(u * u * startX + 2 * u * t * bendX + t * t * targetX),
+              math.floor(u * u * startY + 2 * u * t * bendY + t * t * targetY))
+            task.wait(math.random(15, 30) / 1000)
+          end
+          FarmStats.MouseSweepSide = 1 - side
+          if WhatShouldIBeDoing == "attack" and not Qte.Active and not Stats.CutsceneSkip.Visible and isrbxactive() then
+            mousemoverel(math.random(-3, 3), math.random(-3, 3))
+          end
+        end
+        FarmStats.NextMouseSweepAt = os.clock() + math.random(4, 7)
       end
       task.wait(0.03)
       Tr.step("main", "space")
