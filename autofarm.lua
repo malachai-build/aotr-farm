@@ -1405,22 +1405,27 @@ end
 
 local RetryCount = 0
 
-local function PressRetry()
-  if not IsRetryVisible() or not isrbxactive() then return end
+local function PressRetry(): boolean
+  if not IsRetryVisible() or not isrbxactive() then return false end
   local button = GetPath(PlayerGui, false, "Interface", "Rewards", "Main", "Info", "Main", "Buttons", "Retry") :: GuiObject?
   local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
-  if not button or not viewport then return end
+  if not button or not viewport then return false end
+  local title = button:FindFirstChild("Title") :: TextLabel?
+  if title and string.find(string.upper(title.Text), "STARTING", 1, true) then return true end
   local pos, size = button.AbsolutePosition, button.AbsoluteSize
-  -- Live hover on the raid reward screen: (1427,1137) at 2560x1440, relative to
+  -- Live hover on the raid reward screen: (1426,1136) at 2560x1440, relative to
   -- Retry.AbsolutePosition (1428,1103). Matcha reports zero AbsoluteSize here.
-  local x = pos.X + (size.X > 1 and size.X / 2 or -viewport.X * 0.0004)
-  local y = pos.Y + (size.Y > 1 and size.Y / 2 or viewport.Y * 0.024)
+  local x = pos.X + (size.X > 1 and size.X / 2 or -viewport.X * 0.0012)
+  local y = pos.Y + (size.Y > 1 and size.Y / 2 or viewport.Y * 0.0231)
   mousemoveabs(math.floor(x), math.floor(y))
   mousemoverel(1, 0)
   task.wait(0.18)
   mouse1click()
   RetryCount += 1
-  Boot(string.format("retry direct click %d", RetryCount))
+  task.wait(0.3)
+  local started = title and string.find(string.upper(title.Text), "STARTING", 1, true) ~= nil
+  Boot(string.format("retry click %d (%s)", RetryCount, started and "starting" or "awaiting response"))
+  return started or false
 end
 
 --#endregion -- Ui elements functions --
@@ -2799,8 +2804,8 @@ task.spawn(function() -- The main loop, where the magic happens
       RetryScreenSince = RetryScreenSince or os.clock()
       FarmStats.Status = "pressing retry"
       DebugPrint("debug", nil, nil, nil, "Detected that the retry button is visible.")
-      PressRetry()
-      task.wait(3)
+      local retryStarting = PressRetry()
+      task.wait(retryStarting and 0.5 or 3)
       continue
     end
     RetryScreenSince = nil
