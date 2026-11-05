@@ -17,6 +17,7 @@ end
 
 
 local Stats = {}
+local UI = { lib = nil, window = nil, controls = {}, unloading = false, ready = false }
 
 local ScriptStart = os.clock()
 
@@ -1805,6 +1806,7 @@ local function KillTitan(titan: Instance)
       StartTime = os.clock() -- an unfocused stretch should not count toward the timeout
       task.wait(0.5)
     else
+      if UI.IsOpen() then FarmStats.Status = "settings open"; task.wait(0.1); continue end
       if WhatShouldIBeDoing ~= "attack" then task.wait(0.1); continue end
       FarmStats.Status = "attacking"
       CurrentTitanTarget = titan
@@ -1846,6 +1848,7 @@ local function KillTitan(titan: Instance)
       Tr.step("main", "slash wait")
       task.wait()
       Tr.step("main", "click")
+      if UI.IsOpen() then continue end
       mouse1click()
       task.wait(0.03)
       if Shifted then
@@ -1854,7 +1857,8 @@ local function KillTitan(titan: Instance)
         UseTitanSkill()
       else
         Tr.step("main", "space")
-        keypress(0x20)
+        if UI.IsOpen() then continue end
+      keypress(0x20)
         task.wait(0.03)
         keyrelease(0x20)
         Tr.step("main", "try shift")
@@ -2134,8 +2138,44 @@ RenderConn = game:GetService("RunService").RenderStepped:Connect(OnRenderStepped
 -- bob, reload spot). UE's own Settings tab has the menu key and configs. Our settings are
 -- saved to aotr_farm.json on every change and loaded at start.
 local UE_URL = "https://raw.githubusercontent.com/hauntedscripts/Scripts2/refs/heads/main/matcha%20ue"
-local UI = { lib = nil, window = nil, controls = {}, unloading = false }
 local KEYS = { farm = 0x75, unload = 0x23 } -- F6, End
+
+-- Roblox can hide its native cursor in combat; draw a pointer above the settings UI.
+function UI.IsOpen()
+  return not UI.unloading and UI.window and UI.window.Visible == true
+    and UI.lib and UI.lib.Toggled ~= false and not UI.lib._unloaded
+end
+function UI.RemoveCursor()
+  if UI.cursorFill then UI.cursorFill:Remove(); UI.cursorFill = nil end
+  if UI.cursorEdge then UI.cursorEdge:Remove(); UI.cursorEdge = nil end
+end
+function UI.UpdateCursor()
+  if Stopped() or UI.unloading then UI.RemoveCursor(); return end
+  local visible = UI.IsOpen() and isrbxactive() == true
+  if not visible then
+    if UI.cursorFill then UI.cursorFill.Visible = false; UI.cursorEdge.Visible = false end
+    return
+  end
+  if not UI.cursorFill then
+    UI.cursorFill = Drawing.new("Triangle")
+    UI.cursorFill.Filled = true
+    UI.cursorFill.Color = Color3.fromRGB(255, 255, 255)
+    UI.cursorFill.ZIndex = 10000
+    UI.cursorEdge = Drawing.new("Triangle")
+    UI.cursorEdge.Filled = false
+    UI.cursorEdge.Thickness = 2
+    UI.cursorEdge.Color = Color3.fromRGB(10, 10, 10)
+    UI.cursorEdge.ZIndex = 10001
+  end
+  local mouse = LocalPlayer:GetMouse()
+  local a = Vector2.new(mouse.X, mouse.Y)
+  local b = Vector2.new(mouse.X + 5, mouse.Y + 18)
+  local c = Vector2.new(mouse.X + 14, mouse.Y + 12)
+  for _, cursor in ipairs({ UI.cursorFill, UI.cursorEdge }) do
+    cursor.PointA, cursor.PointB, cursor.PointC = a, b, c
+    cursor.Visible = true
+  end
+end
 
 local function findUE()
   local envs = {}
@@ -2181,6 +2221,7 @@ local function Unload()
   if _G.AotrRunId == RunId then _G.AotrStop = true end
   CurrentTitanTarget = nil
   UI.unloading = true
+  UI.RemoveCursor()
   Heartbeat("unloaded")
   if UI.lib and not UI.lib._unloaded and type(UI.lib.Unload) == "function" then pcall(function() UI.lib:Unload() end) end
 end
@@ -2382,6 +2423,7 @@ local lastBeat, lastStatusTick = 0, 0
 local lastBox, boxWrites = 0, 0
 local LastStatusText = nil
 StatusTick = function()
+  UI.UpdateCursor()
   if os.clock() - lastStatusTick < 0.1 then return end
   lastStatusTick = os.clock()
   TraceStatus()
@@ -2423,6 +2465,7 @@ StatusTick = function()
   end
 end
 StatusCleanup = function()
+  UI.RemoveCursor()
   if StatusLabel then pcall(function() StatusLabel:Remove() end); StatusLabel = nil end
 end
 
