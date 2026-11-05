@@ -1,10 +1,18 @@
 -- Game name: Attack on Titans Revolution
 -- Game Id: 4658598196
 -- Game UniverseId: 4658598196
--- Game PlaceIds: 13379208636 (Lobby), 13379349730 (Mission) 4658598196 ( x )
+-- Social places: 13379208636 (Main menu), 14916516914 (Lobby), 14932214603 (Trade hub)
 -- Game link: https://www.roblox.com/games/13379208636/Attack-on-Titan-Revolution
 
 -- Script version: 1.0.7
+
+-- Manual/local execution must stand down before loading the UI or mission services.
+-- Main menu, lobby, trade hub: "unloaded" works with the unchanged watcher.
+if game.PlaceId == 13379208636 or game.PlaceId == 14916516914 or game.PlaceId == 14932214603 then
+  if not isfolder("aotr") then makefolder("aotr") end
+  writefile("aotr/heartbeat.txt", "unloaded " .. os.date("%H:%M:%S"))
+  return
+end
 
 
 
@@ -277,7 +285,6 @@ if identifyexecutor and identifyexecutor() ~= "Matcha" then Boot("exit: executor
 -- Auto-exec can fire before the DataModel has its ids; wait so the game check below is real.
 repeat task.wait(0.25) until game.GameId ~= 0 and game.PlaceId ~= 0
 if game.GameId ~= 4658598196 then Boot("exit: wrong game " .. tostring(game.GameId)); DebugPrint("debug", nil, nil, nil, "Wrong game detected..?"); return end
-if game.PlaceId == 14916516914 then Boot("exit: lobby"); Heartbeat("lobby"); DebugPrint("debug", nil, nil, nil, "You seem to be in the lobby. Please execute this in a game."); return end
 Boot("game ok")
 
 local function WaitForService(serviceName: string)
