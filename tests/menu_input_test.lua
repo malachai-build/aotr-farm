@@ -18,6 +18,19 @@ local Drawing = {new=function(kind)
 end}
 ]====]
   local checks = [====[
+UI.window.Position=Vector2.new(200,300); UI.window.Size=Vector2.new(540,580)
+assert(not UI.IsInteracting(),"visible window must not pause combat with cursor outside")
+UI.window.Position=Vector2.new(100,400)
+assert(UI.IsInteracting(),"cursor over settings must protect controls")
+UI.window.Position=Vector2.new(500,500)
+for _, field in ipairs({"Dragging","SliderDrag","CaptureInput","ColorInput","ColorDrag","OpenDropdown","OpenColorPicker"}) do
+  UI.window[field]=true; assert(UI.IsInteracting(),"active control retains input outside window: "..field)
+  UI.window[field]=nil
+end
+assert(not UI.IsInteracting(),"combat resumes after control is released")
+UI.window.Visible=false; UI.window.Dragging=true
+assert(not UI.IsInteracting(),"hidden window cannot retain input")
+UI.window.Visible=true; UI.window.Dragging=nil
 UI.UpdateCursor()
 assert(made==2 and UI.cursorFill.Visible and UI.cursorEdge.Visible)
 assert(UI.cursorFill.PointA.X==123 and UI.cursorFill.PointA.Y==456)
@@ -33,7 +46,7 @@ assert(removed==4 and not UI.cursorFill,"stop removes cursor")
 ]====]
   assert(loadstring(header .. extract(source,"function UI.IsOpen()","local function findUE()") .. checks,"menu_cursor_fixtures"))()
 end
-print("PASS: cursor follows mouse, visibility, drawing reuse, unload and stop cleanup in both farms")
+print("PASS: menu hover and active control gating, cursor visibility and cleanup in both farms")
 
 local source = readfile("aotr/autofarm_branch.lua")
 local sweep = extract(source,"      if UserConfigs.RandomMouseMovements and not UI.IsOpen()", "      task.wait(0.03)")

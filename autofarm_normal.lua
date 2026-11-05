@@ -1806,7 +1806,7 @@ local function KillTitan(titan: Instance)
       StartTime = os.clock() -- an unfocused stretch should not count toward the timeout
       task.wait(0.5)
     else
-      if UI.IsOpen() then FarmStats.Status = "settings open"; task.wait(0.1); continue end
+      if UI.IsInteracting() then FarmStats.Status = "editing settings"; task.wait(0.1); continue end
       if WhatShouldIBeDoing ~= "attack" then task.wait(0.1); continue end
       FarmStats.Status = "attacking"
       CurrentTitanTarget = titan
@@ -1848,7 +1848,7 @@ local function KillTitan(titan: Instance)
       Tr.step("main", "slash wait")
       task.wait()
       Tr.step("main", "click")
-      if UI.IsOpen() then continue end
+      if UI.IsInteracting() then continue end
       mouse1click()
       task.wait(0.03)
       if Shifted then
@@ -1857,7 +1857,7 @@ local function KillTitan(titan: Instance)
         UseTitanSkill()
       else
         Tr.step("main", "space")
-        if UI.IsOpen() then continue end
+        if UI.IsInteracting() then continue end
       keypress(0x20)
         task.wait(0.03)
         keyrelease(0x20)
@@ -2144,6 +2144,17 @@ local KEYS = { farm = 0x75, unload = 0x23 } -- F6, End
 function UI.IsOpen()
   return not UI.unloading and UI.window and UI.window.Visible == true
     and UI.lib and UI.lib.Toggled ~= false and not UI.lib._unloaded
+end
+function UI.IsInteracting()
+  if not UI.IsOpen() then return false end
+  local win = UI.window
+  if win.Dragging or win.SliderDrag or win.CaptureInput or win.ColorInput
+    or win.ColorDrag or win.OpenDropdown or win.OpenColorPicker then return true end
+  local position, size = win.Position, win.Size
+  if not position or not size then return false end
+  local mouse = LocalPlayer:GetMouse()
+  return mouse.X >= position.X and mouse.X <= position.X + size.X
+    and mouse.Y >= position.Y and mouse.Y <= position.Y + size.Y
 end
 function UI.RemoveCursor()
   if UI.cursorFill then UI.cursorFill:Remove(); UI.cursorFill = nil end
