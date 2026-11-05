@@ -404,6 +404,18 @@ function Close-Overlay($m) {
   return $closed
 }
 
+function Stop-TeleportMatcha {
+  if ($DryRun) { return }
+  $exe = [IO.Path]::GetFileNameWithoutExtension($MatchaExe)
+  Get-Process -Name $exe -ErrorAction SilentlyContinue |
+    Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe } |
+    ForEach-Object {
+      $target = $_
+      try { $target | Stop-Process -Force -ErrorAction Stop }
+      catch { Write-Log "Could not stop Matcha PID $($target.Id): $($_.Exception.Message)" }
+    }
+}
+
 function Start-Matcha {
   Start-Process -FilePath $MatchaExe -WorkingDirectory (Split-Path $MatchaExe)
   $script:overlayStartupUntil = (Get-Date).AddSeconds(30)
@@ -525,7 +537,7 @@ function Read-RobloxLog {
 if ($RestartOnTeleport) { [void](Read-RobloxLog) } # start at the end of the current log
 
 while ($true) {
-  Start-Sleep -Seconds $PollSeconds
+  if ($teleportSince) { Start-Sleep -Milliseconds 100 } else { Start-Sleep -Seconds $PollSeconds }
   # -RestartOnTeleport: Matcha's own reload after a teleport is the unreliable step (it hangs or
   # skips auto-exec), so close it as the teleport starts and launch a fresh one, which runs
   # auto-exec reliably, once Roblox has joined the next server.
@@ -534,17 +546,20 @@ while ($true) {
       if ($l -match 'doTeleport: url' -and -not $teleportSince) {
         $teleportSince = Get-Date; $joinSeen = $false
         Write-Log "teleport started - closing Matcha until the next server is joined"
-        if (-not $DryRun) { Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($MatchaExe)) -ErrorAction SilentlyContinue | Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe } | Stop-Process -Force }
+        Stop-TeleportMatcha
       } elseif ($teleportSince -and $l -match "Joining game '([0-9a-f-]+)' place (\d+)") {
         $joinSeen = $true; $joinInfo = "$($Matches[1].Substring(0,8)) place $($Matches[2])"
       } elseif ($teleportSince -and $joinSeen -and $l -match 'Replicator created for player') {
         Write-Log ("joined {0} after {1:N0}s - starting Matcha" -f $joinInfo, ((Get-Date) - $teleportSince).TotalSeconds)
         $teleportSince = $null
+        Stop-TeleportMatcha
         if (-not $DryRun) { Start-Matcha }
         $lastAction = Get-Date; $attempts = 0; $retriesSinceMatcha = $null; $lastReported = ""
       }
     }
     if ($teleportSince) {
+      # Matcha may respawn itself during the loading screen. Keep it closed until our launch.
+      Stop-TeleportMatcha
       if (((Get-Date) - $teleportSince).TotalSeconds -lt $JoinTimeoutSeconds) { continue }
       Write-Log ("no join in Roblox's log after {0}s - starting Matcha anyway" -f $JoinTimeoutSeconds)
       $teleportSince = $null
