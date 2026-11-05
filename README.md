@@ -35,6 +35,8 @@ The farm writes `aotr/heartbeat.txt` relative to Matcha's workspace. Users do no
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\aotr_watchdog_portable.ps1" -ValidateOnly
 ```
 
+The overlay-close key is read from Matcha's saved `global.cfg` (`menukey`). With no saved key it uses Insert; custom keys such as Right Arrow work automatically. `-OverlayKey <virtual-key code>` provides an explicit override. `-ValidateOnly` displays the selected key and configuration path. Startup cleanup also runs while waiting for the first farm heartbeat.
+
 Use `-ShowWorkspace` instead of `-ValidateOnly` to open the workspace in Explorer. Enable Matcha's MCP server (default `http://127.0.0.1:8765/mcp`) for workspace verification. Unusual workspace locations can use `-WorkspaceRoot`; a live verification rejects an override that points to a different workspace.
 
 Workspace regression check: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\watchdog_workspace_test.ps1`.
