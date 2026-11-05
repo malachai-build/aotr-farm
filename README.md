@@ -52,3 +52,11 @@ Character checks run at startup, after HP loss, and during combat. Ragdoll detec
 The farm writes a single `recovering` heartbeat per interrupted episode. The updated watchdog allows 20 seconds for native recovery, then uses its existing Matcha-restart/Retry sequence. Manual Unload still disables recovery. A new server/respawn may still be required if the game's character controller cannot recover.
 
 Regression fixtures: `tests/character_recovery_test.lua` (both sources staged at `aotr/recovery_tests/normal.lua` and `raid.lua`).
+
+## Teleport restart timing
+
+Teleport recovery records the process it stops and waits briefly for that exact PID to exit before starting a replacement. A pending launch retries every 250 ms, outside the normal stall-recovery cooldown; a live replacement is reused. The log records join-marker age and actual process-launch latency.
+
+The Roblox log follower checks game-session markers and content timestamps rather than relying on directory modification times. Idle/tray logs cannot displace a game log. Offsets and unfinished lines are tracked per file; new game logs retain their first join events.
+
+Regression check: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\watchdog_teleport_test.ps1`.

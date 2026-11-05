@@ -413,14 +413,35 @@ function Close-Overlay($m) {
   return $closed
 }
 
+# Process objects retain the identity of the stopped PID; never confuse it with a live replacement.
+function Wait-TeleportMatchaExit {
+  $deadline = (Get-Date).AddMilliseconds(1500)
+  foreach ($stopped in $script:teleportStopped) {
+    try {
+      if ($stopped.HasExited) { continue }
+      $remaining = [Math]::Max(0, [int]($deadline - (Get-Date)).TotalMilliseconds)
+      if (-not $stopped.WaitForExit($remaining)) { return $false }
+    } catch [InvalidOperationException] { continue }
+    catch { Write-Log "Cannot verify stopped Matcha PID $($stopped.Id) has exited: $($_.Exception.Message)"; return $false }
+  }
+  $script:teleportStopped = @()
+  return $true
+}
+
 function Start-Matcha {
+  $script:matchaLaunchSucceeded = $false
   $existing = Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($MatchaExe)) -ErrorAction SilentlyContinue |
     Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe } | Select-Object -First 1
   if ($existing) {
     Write-Log "Matcha already running (PID $($existing.Id)); ensuring overlay is closed"
   } else {
-    Start-Process -FilePath $MatchaExe -WorkingDirectory (Split-Path $MatchaExe)
+    try {
+      $launched = Start-Process -FilePath $MatchaExe -WorkingDirectory (Split-Path $MatchaExe) -PassThru -ErrorAction Stop
+      $delay = if ($script:teleportReadyAt) { "; {0:N0}ms after join readiness" -f ((Get-Date) - $script:teleportReadyAt).TotalMilliseconds } else { '' }
+      Write-Log "Matcha process launched (PID $($launched.Id))$delay"
+    } catch { Write-Log "Matcha launch failed: $($_.Exception.Message)"; return }
   }
+  $script:matchaLaunchSucceeded = $true
   $script:overlayStartupUntil = (Get-Date).AddSeconds(30)
   $deadline = (Get-Date).AddSeconds(20)
   do {
@@ -511,58 +532,120 @@ $mcpDownSince = $null
 $retrySince = $null
 $teleportSince = $null   # -RestartOnTeleport: set while Matcha is closed, waiting for the next join
 $joinSeen = $false
-$rbxLog = $null; $rbxOffset = 0L; $rbxCarry = ""
+$rbxLog = $null; $rbxReaders = @{}; $rbxInitialized = $false
+$teleportStopped = @(); $teleportReadyAt = $null; $teleportLaunchPending = $false
 
 # New lines in Roblox's client log since the last call (reads only the appended bytes, shared, so
 # Roblox keeps writing). Follows a newer log file when Roblox restarts.
 function Read-RobloxLog {
-  # The directory listing's Length and LastWriteTime lag far behind for a log Roblox still has
-  # open, so the real length comes from the stream. Crash-handler logs are skipped.
-  $newest = Get-ChildItem $RobloxLogDir -Filter '*_Player_*.log' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'CrashHandler' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-  if (-not $newest) { return @() }
-  try {
-    $fs = [IO.File]::Open($newest.FullName, 'Open', 'Read', 'ReadWrite, Delete')
+  $all = @(Get-ChildItem $RobloxLogDir -Filter '*_Player_*.log' -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'CrashHandler' })
+  # Directory write times can remain stale while Roblox holds a log open. Include logs
+  # created with the running game, recent files, and the file we already follow.
+  $player = Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1
+  $files = @($all | Sort-Object CreationTime -Descending | Select-Object -First 8)
+  $files += @($all | Sort-Object LastWriteTime -Descending | Select-Object -First 8)
+  if ($player -and $player.StartTime) { $files += @($all | Where-Object { [Math]::Abs(($_.CreationTime - $player.StartTime).TotalSeconds) -lt 30 }) }
+  if ($script:rbxLog) { $files += @($all | Where-Object { $_.FullName -eq $script:rbxLog }) }
+  $choices = foreach ($file in ($files | Sort-Object FullName -Unique)) {
     try {
-      if ($newest.FullName -ne $script:rbxLog) { $script:rbxLog = $newest.FullName; $script:rbxOffset = $fs.Length; return @() }
-      if ($fs.Length -le $script:rbxOffset) { return @() }
-      [void]$fs.Seek($script:rbxOffset, 'Begin')
+      $fs = [IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite, Delete')
+      try {
+        $length = $fs.Length
+        if (-not $script:rbxReaders.ContainsKey($file.FullName)) {
+          $script:rbxReaders[$file.FullName] = @{ Offset = $(if ($script:rbxInitialized) { 0L } else { $length }); Carry = ''; Length = -1L; Session = $false; JoinAt = [DateTimeOffset]::MinValue; Latest = [DateTimeOffset]::MinValue }
+        }
+        $state = $script:rbxReaders[$file.FullName]
+        if ($length -lt $state.Length) {
+          $state.Offset = 0L; $state.Carry = ''; $state.Session = $false; $state.JoinAt = [DateTimeOffset]::MinValue; $state.Latest = [DateTimeOffset]::MinValue
+        }
+        if ($length -ne $state.Length) {
+          # Bounded content samples classify real game logs and date their actual activity.
+          $headSize = [int][Math]::Min(32768L, $length)
+          $bytes = New-Object byte[] $headSize
+          $read = $fs.Read($bytes, 0, $headSize)
+          $sample = [Text.Encoding]::UTF8.GetString($bytes, 0, $read)
+          if ($length -gt $headSize) {
+            [void]$fs.Seek([Math]::Max([long]$headSize, $length - 65536L), 'Begin')
+            $sample += "`n" + (New-Object IO.StreamReader($fs)).ReadToEnd()
+          }
+          foreach ($match in [regex]::Matches($sample, '(?m)^(\d{4}-\d\d-\d\dT[^,\s]+)[^\r\n]*')) {
+            $at = [DateTimeOffset]::MinValue
+            if (-not [DateTimeOffset]::TryParse($match.Groups[1].Value, [ref]$at)) { continue }
+            if ($at -gt $state.Latest) { $state.Latest = $at }
+            if ($match.Value -match "Joining game '[0-9a-f-]+' place \d+|Replicator created for player") {
+              $state.Session = $true
+              if ($at -gt $state.JoinAt) { $state.JoinAt = $at }
+            }
+          }
+          $state.Length = $length
+        }
+        if ($state.Session) { [pscustomobject]@{ Path = $file.FullName; JoinAt = $state.JoinAt; Latest = $state.Latest } }
+      } finally { $fs.Dispose() }
+    } catch { continue }
+  }
+  $script:rbxInitialized = $true
+  $best = $choices | Sort-Object JoinAt, Latest -Descending | Select-Object -First 1
+  if (-not $best) { return @() }
+  if ($best.Path -ne $script:rbxLog) { Write-Log "following Roblox game log: $(Split-Path -Leaf $best.Path)"; $script:rbxLog = $best.Path }
+  $state = $script:rbxReaders[$best.Path]
+  try {
+    $fs = [IO.File]::Open($best.Path, 'Open', 'Read', 'ReadWrite, Delete')
+    try {
+      if ($fs.Length -le $state.Offset) { return @() }
+      [void]$fs.Seek($state.Offset, 'Begin')
       $text = (New-Object IO.StreamReader($fs)).ReadToEnd()
-      $script:rbxOffset = $fs.Length
-    } finally { $fs.Close() }
-    # Keep an unfinished last line for the next read, so a marker split across reads still matches.
-    $parts = ($script:rbxCarry + $text) -split "`n"
-    $script:rbxCarry = $parts[-1]
-    if ($parts.Count -gt 1) { return $parts[0..($parts.Count - 2)] } else { return @() }
+      $state.Offset = $fs.Position
+    } finally { $fs.Dispose() }
+    $parts = ($state.Carry + $text) -split "`n"
+    $state.Carry = $parts[-1]
+    if ($parts.Count -gt 1) { return $parts[0..($parts.Count - 2)] }
   } catch { return @() }
+  return @()
 }
+
 if ($RestartOnTeleport) { [void](Read-RobloxLog) } # start at the end of the current log
 
 while ($true) {
-  Start-Sleep -Seconds $PollSeconds
-  # -RestartOnTeleport: Matcha's own reload after a teleport is the unreliable step (it hangs or
-  # skips auto-exec), so close it as the teleport starts and launch a fresh one, which runs
-  # auto-exec reliably, once Roblox has joined the next server.
+  if ($teleportSince) { Start-Sleep -Milliseconds 250 } else { Start-Sleep -Seconds $PollSeconds }
   if ($RestartOnTeleport) {
     foreach ($l in (Read-RobloxLog)) {
       if ($l -match 'doTeleport: url' -and -not $teleportSince) {
-        $teleportSince = Get-Date; $joinSeen = $false
-        Write-Log "teleport started - closing Matcha until the next server is joined"
-        if (-not $DryRun) { Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($MatchaExe)) -ErrorAction SilentlyContinue | Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe } | Stop-Process -Force }
+        $teleportSince = Get-Date; $joinSeen = $false; $teleportReadyAt = $null; $teleportLaunchPending = $false
+        Write-Log 'teleport started - closing Matcha until the next server is joined'
+        $teleportStopped = @()
+        if (-not $DryRun) {
+          $targets = @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($MatchaExe)) -ErrorAction SilentlyContinue | Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe })
+          foreach ($target in $targets) {
+            try { $target | Stop-Process -Force -ErrorAction Stop; $teleportStopped += $target }
+            catch { Write-Log "Could not stop Matcha PID $($target.Id): $($_.Exception.Message)"; $teleportStopped += $target }
+          }
+        }
       } elseif ($teleportSince -and $l -match "Joining game '([0-9a-f-]+)' place (\d+)") {
         $joinSeen = $true; $joinInfo = "$($Matches[1].Substring(0,8)) place $($Matches[2])"
       } elseif ($teleportSince -and $joinSeen -and $l -match 'Replicator created for player') {
-        Write-Log ("joined {0} after {1:N0}s - starting Matcha" -f $joinInfo, ((Get-Date) - $teleportSince).TotalSeconds)
-        $teleportSince = $null
-        if (-not $DryRun) { Start-Matcha }
-        $lastAction = Get-Date; $attempts = 0; $retriesSinceMatcha = $null; $lastReported = ""
+        if (-not $teleportReadyAt) {
+          $teleportReadyAt = Get-Date
+          $eventAt = [DateTimeOffset]::MinValue
+          $markerAge = if ([DateTimeOffset]::TryParse(($l -split ',')[0], [ref]$eventAt)) { '; marker age {0:N0}ms' -f ([DateTimeOffset]::Now - $eventAt).TotalMilliseconds } else { '' }
+          Write-Log ("joined {0} after {1:N1}s; replacement launch pending{2}" -f $joinInfo, ((Get-Date) - $teleportSince).TotalSeconds, $markerAge)
+        }
+        $teleportLaunchPending = $true
       }
     }
     if ($teleportSince) {
-      if (((Get-Date) - $teleportSince).TotalSeconds -lt $JoinTimeoutSeconds) { continue }
-      Write-Log ("no join in Roblox's log after {0}s - starting Matcha anyway" -f $JoinTimeoutSeconds)
-      $teleportSince = $null
-      if (-not $DryRun) { Start-Matcha }
-      $lastAction = Get-Date
+      if (-not $teleportLaunchPending -and ((Get-Date) - $teleportSince).TotalSeconds -ge $JoinTimeoutSeconds) {
+        Write-Log "no join in Roblox's log after ${JoinTimeoutSeconds}s - replacement launch pending"
+        $teleportLaunchPending = $true
+      }
+      if (-not $teleportLaunchPending) { continue }
+      # Stop-Process is asynchronous. A dying PID is not an already-running replacement.
+      # Retry a pending launch on the fast poll; never send it through the recovery cooldown.
+      if (-not $DryRun -and -not (Wait-TeleportMatchaExit)) { continue }
+      if ($DryRun) { Write-Log 'would start Matcha after teleport'; $matchaLaunchSucceeded = $true }
+      else { Start-Matcha }
+      if (-not $matchaLaunchSucceeded) { continue }
+      $teleportSince = $null; $teleportReadyAt = $null; $teleportLaunchPending = $false
+      $lastAction = Get-Date; $attempts = 0; $retriesSinceMatcha = $null; $lastReported = ''
       continue
     }
   }
