@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference='Stop'
+$ErrorActionPreference='Stop'
 $target=Join-Path $PSScriptRoot '..\watchdog\aotr_watchdog_portable.ps1'
 $source=Get-Content -LiteralPath $target -Raw
 $tokens=$null;$errors=$null
@@ -43,10 +43,10 @@ Assert (-not (Close-Overlay $null) -and $script:sent.Count -eq 0 -and ($script:l
 $script:open=$null;$script:focus=$true;$script:log=@()
 Assert (-not (Close-Overlay $null) -and ($script:log -join '') -match 'unavailable') 'missing window is unknown rather than closed'
 $script:open=$true;$script:sent=@();Start-Matcha
-Assert ($script:starts -eq 0 -and $script:sent.Count -eq 1 -and -not $script:open) 'existing Matcha still receives overlay cleanup without a second launch'
+Assert ($script:starts -eq 1 -and $script:sent.Count -eq 1 -and -not $script:open) 'restart launches immediately even when an existing process is listed, then closes overlay'
 $script:exists=$false;$script:open=$true;$script:sent=@()
 Set-Content -LiteralPath "$fixture\global.cfg" -Value '{}'
 Start-Matcha
-Assert ($script:starts -eq 1 -and $script:sent.Count -eq 1 -and $script:sent[0] -eq 45 -and -not $script:open) 'new Matcha launch closes default Insert overlay'
+Assert ($script:starts -eq 2 -and $script:sent.Count -eq 1 -and $script:sent[0] -eq 45 -and -not $script:open) 'new Matcha launch closes default Insert overlay'
 $loop=$source.IndexOf('while ($true)')
 Assert ($source.IndexOf('  # An overlay left open',$loop) -lt $source.IndexOf('  if (-not $heartbeatSeen) {',$loop)) 'overlay cleanup runs before first-heartbeat wait'
