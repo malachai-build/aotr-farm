@@ -1433,19 +1433,34 @@ end
 
 local RetryCount = 0
 
+-- Matcha returns AbsoluteSize=(0,0) and no Size for this game's GUI buttons. Use the live
+-- AbsolutePosition plus the measured 2560x1440 offset, scaled uniformly by viewport height.
+-- Uniform scaling keeps the click inside the same UI control at 1080p and on wider monitors.
+function Stats.GuiClickPoint(Button: Instance, fallbackX: number, fallbackY: number, preferFallback: boolean?): (number?, number?)
+  local Viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
+  local Position = Button and Button.AbsolutePosition
+  if not Viewport or Viewport.X < 2 or Viewport.Y < 2 or not Position then return nil, nil end
+  local Size = Button.AbsoluteSize
+  local scale = Viewport.Y / 1440
+  local x = Position.X + fallbackX * 2560 * scale
+  local y = Position.Y + fallbackY * 1440 * scale
+  if not preferFallback and Size and Size.X > 1 and Size.Y > 1 then
+    x, y = Position.X + Size.X / 2, Position.Y + Size.Y / 2
+  end
+  return math.floor(math.clamp(x, 1, Viewport.X - 1)), math.floor(math.clamp(y, 1, Viewport.Y - 1))
+end
+
 local function PressRetry(): boolean
   if not IsRetryVisible() or not isrbxactive() then return false end
   local button = GetPath(PlayerGui, false, "Interface", "Rewards", "Main", "Info", "Main", "Buttons", "Retry") :: GuiObject?
-  local viewport = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize
-  if not button or not viewport then return false end
+  if not button then return false end
   local title = button:FindFirstChild("Title") :: TextLabel?
   if title and string.find(string.upper(title.Text), "STARTING", 1, true) then return true end
-  local pos, size = button.AbsolutePosition, button.AbsoluteSize
   -- Verified live click: (1475,1136) at 2560x1440. Retry.AbsolutePosition is
   -- (1428,1103), while Matcha reports zero AbsoluteSize for this button.
-  local x = pos.X + (size.X > 1 and size.X / 2 or viewport.X * 0.018)
-  local y = pos.Y + (size.Y > 1 and size.Y / 2 or viewport.Y * 0.0231)
-  local targetX, targetY = math.floor(x) + math.random(-2, 2), math.floor(y) + math.random(-2, 2)
+  local x, y = Stats.GuiClickPoint(button, 0.018, 0.0231)
+  if not x then return false end
+  local targetX, targetY = x + math.random(-2, 2), y + math.random(-2, 2)
   mousemoveabs(targetX, targetY)
   mousemoverel(1, 0)
   local mouse = LocalPlayer:GetMouse()
@@ -1903,24 +1918,20 @@ function CrateRoute.EquipmentMenuOpen(): boolean
 end
 
 function CrateRoute.ClickButton(Button: Instance, fallbackX: number, fallbackY: number)
-  local Position = Button.AbsolutePosition
-  local Size = Button.AbsoluteSize
-  local Viewport = Workspace.CurrentCamera.ViewportSize
-  local x = Position.X + (Size and Size.X > 1 and Size.X / 2 or Viewport.X * fallbackX)
-  local y = Position.Y + (Size and Size.Y > 1 and Size.Y / 2 or Viewport.Y * fallbackY)
-  mousemoveabs(math.floor(x) + math.random(-2, 2), math.floor(y) + math.random(-2, 2))
+  local x, y = Stats.GuiClickPoint(Button, fallbackX, fallbackY)
+  if not x then return end
+  mousemoveabs(x + math.random(-2, 2), y + math.random(-2, 2))
   mousemoverel(1, 0) -- Matcha's absolute move alone does not trigger this game's GUI hover.
   task.wait(math.random(16, 28) / 100)
   mouse1click()
 end
 
 function CrateRoute.ClickKeyChest(Button: Instance): boolean
-  local Position = Button.AbsolutePosition
-  local Viewport = Workspace.CurrentCamera.ViewportSize
   -- Verified on the live Premium OPEN button: move to (1792,1008), nudge, then
   -- wait for the cursor to settle before sending a separate click.
-  local x = math.floor(Position.X + Viewport.X * 0.04) + math.random(-1, 1)
-  local y = math.floor(Position.Y + Viewport.Y * 0.0175) + math.random(-1, 1)
+  local x, y = Stats.GuiClickPoint(Button, 0.04, 0.0175, true)
+  if not x then return false end
+  x, y = x + math.random(-1, 1), y + math.random(-1, 1)
   mousemoveabs(x, y)
   mousemoverel(1, 0)
   local mouse = LocalPlayer:GetMouse()
@@ -1937,7 +1948,7 @@ end
 
 -- The raid ends at Interface.Chests before the usual Rewards screen. Matcha reads these
 -- buttons' AbsolutePosition but reports zero AbsoluteSize, so the hover samples supply
--- viewport-scaled click offsets. The free button disappears once its chest opens.
+-- click offsets scaled from the 1440p reference. The free button disappears once its chest opens.
 CrateRoute.RaidChestOpenedAt = nil
 CrateRoute.RaidKeyChestDone = false
 CrateRoute.RaidKeyChestCount = nil
@@ -1990,10 +2001,8 @@ function CrateRoute.HandleRaidChest(): boolean
       else
         FarmStats.Status = "key chest click unconfirmed"
         if CrateRoute.RaidKeyChestAttempts == 1 and os.clock() - CrateRoute.RaidKeyChestAttemptAt >= CrateRoute.RaidKeyChestRetryDelay and premium and isrbxactive() then
-          local pos = premium.AbsolutePosition
-          local viewport = Workspace.CurrentCamera.ViewportSize
-          local x = math.floor(pos.X + viewport.X * 0.04)
-          local y = math.floor(pos.Y + viewport.Y * 0.0175)
+          local x, y = Stats.GuiClickPoint(premium, 0.04, 0.0175, true)
+          if not x then return true end
           local mouse = LocalPlayer:GetMouse()
           if math.abs(mouse.X - x) > 6 or math.abs(mouse.Y - y) > 6 then
             mousemoveabs(x, y)
