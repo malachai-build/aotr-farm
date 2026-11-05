@@ -51,6 +51,7 @@ param(
   [int]$PollSeconds = 2,       # main loop interval
   [int]$OverlaySeconds = 15,   # close Matcha's overlay once it has stayed open this long
   [int]$FastStaleSeconds = 5,  # with -RestartMatcha: restart Matcha once a "farming" heartbeat is this old (the farm beats every 1s)
+  [int]$CharacterRecoverySeconds = 20, # allow the game to clear a grab/ragdoll before watchdog recovery
   [int]$RetryStuckSeconds = 45, # restart a farm that keeps heartbeating on the Retry screen
   [switch]$TryScriptRestart,   # first try starting the farm through the MCP (0 of 3 attempts worked on 2026-11-01)
   [switch]$RestartOnTeleport,  # close Matcha when Roblox starts a teleport, start it fresh once the new server is joined
@@ -275,6 +276,15 @@ if ($ShowWorkspace) {
   return
 }
 
+# Hold one watchdog per Matcha executable. OS cleanup releases it if this process exits.
+if (-not $ValidateOnly) {
+  $hash = [Security.Cryptography.SHA256]::Create()
+  try { $key = [BitConverter]::ToString($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($MatchaExe.ToUpperInvariant()))).Replace('-', '') } finally { $hash.Dispose() }
+  $script:watchdogMutex = New-Object Threading.Mutex($false, ("Local\AoTRWatchdog-" + $key))
+  try { $ownsWatchdog = $script:watchdogMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsWatchdog = $true }
+  if (-not $ownsWatchdog) { Write-Host 'An AoTR watchdog is already running for this Matcha. No second watchdog was started.'; $script:watchdogMutex.Dispose(); return }
+}
+
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -359,6 +369,9 @@ function Close-Overlay($m) {
 }
 
 function Start-Matcha {
+  $existing = Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($MatchaExe)) -ErrorAction SilentlyContinue |
+    Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe } | Select-Object -First 1
+  if ($existing) { Write-Log "Matcha already running (PID $($existing.Id)); launch skipped"; return }
   Start-Process -FilePath $MatchaExe -WorkingDirectory (Split-Path $MatchaExe)
   # A fresh Matcha opens its overlay, which swallows the farm's clicks.
   $deadline = (Get-Date).AddSeconds(20)
@@ -608,7 +621,7 @@ while ($true) {
     $limit = $ScriptStaleSeconds
   } else {
     # MCP down: fall back to the heartbeat alone, as before.
-    if ($state -ne "farming") {
+    if ($state -ne "farming" -and $state -ne "recovering") {
       if ($lastReported -ne "mcpdown-$state") { Write-Log "Matcha MCP not answering, farm state '$state', standing down"; $lastReported = "mcpdown-$state" }
       $attempts = 0
       continue
@@ -618,6 +631,13 @@ while ($true) {
     # A reload that never brings the MCP or the farm back (seen 21:09, 2026-11-01) left the
     # character undefended for the full StaleSeconds.
     if ($RestartMatcha -and ((Get-Date) - $mcpDownSince).TotalSeconds -ge $McpDownSeconds) { $limit = $McpDownSeconds }
+  }
+
+  # The farm writes this marker once per recovery episode. Fresh loop activity must not
+  # conceal a ragdoll/incomplete body; allow a short grace period, then use normal recovery.
+  if ($state -eq 'recovering') {
+    $stale = $age
+    $limit = $CharacterRecoverySeconds
   }
 
   # A live retry loop continues writing the heartbeat, so heartbeat age alone never catches it.
@@ -665,7 +685,7 @@ while ($true) {
       else { Write-Log ("farm silent {0:N0}s - could not start the farm script through the MCP (attempt {1})" -f $stale, $attempts) }
     }
     "matcha" {
-      Write-Log ("farm silent {0:N0}s - restarting Matcha to rerun auto-exec (attempt {1})" -f $stale, $attempts)
+      Write-Log ("farm stalled/recovering {0:N0}s - restarting Matcha to rerun auto-exec (attempt {1})" -f $stale, $attempts)
       Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $MatchaExe } | Stop-Process -Force
       Start-Sleep -Seconds 2
       Start-Matcha

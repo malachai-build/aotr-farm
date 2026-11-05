@@ -40,3 +40,13 @@ Use `-ShowWorkspace` instead of `-ValidateOnly` to open the workspace in Explore
 Workspace regression check: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\watchdog_workspace_test.ps1`.
 
 Based on Kitty's AoTR script v1.0.7 (@roguekitty).
+
+## Grab and ragdoll recovery
+
+**Auto QTE / Grab Escape** uses the displayed prompt key for timed QTEs and button-only escape prompts. It releases held keys if disabled and sends no new escape input while Roblox is unfocused. The saved AutoQTE preference is preserved; enable the toggle to use automatic escape.
+
+Character checks run at startup, after HP loss, and during combat. A ragdoll, missing human body parts, or active escape prompt pauses targeting and hover. Damage clears cached character parts. After the game restores an intact character and clears the ragdoll, combat resumes after a short stability check. The script does not force game-owned ragdoll attributes or recreate destroyed body parts.
+
+The farm writes a single `recovering` heartbeat per interrupted episode. The updated watchdog allows 20 seconds for native recovery, then uses its existing Matcha-restart/Retry sequence. Manual Unload still disables recovery. A new server/respawn may still be required if the game's character controller cannot recover.
+
+Regression fixtures: `tests/character_recovery_test.lua` (both sources staged at `aotr/recovery_tests/normal.lua` and `raid.lua`).
