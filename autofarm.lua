@@ -1900,12 +1900,14 @@ end
 -- viewport-scaled click offsets. The free button disappears once its chest opens.
 CrateRoute.RaidChestOpenedAt = nil
 CrateRoute.RaidKeyChestDone = false
+CrateRoute.RaidKeyChestCount = nil
 function CrateRoute.HandleRaidChest(): boolean
   local chests = Interface:FindFirstChild("Chests")
   if not chests or not IsObjectVisible(chests) then
     if WhatShouldIBeDoing == "chest" then WhatShouldIBeDoing = "attack" end
     CrateRoute.RaidChestOpenedAt = nil
     CrateRoute.RaidKeyChestDone = false
+    CrateRoute.RaidKeyChestCount = nil
     return false
   end
   if not UserConfigs.AutoRaidChest then return false end
@@ -1925,30 +1927,41 @@ function CrateRoute.HandleRaidChest(): boolean
   end
   CrateRoute.RaidChestOpenedAt = CrateRoute.RaidChestOpenedAt or os.clock()
   if os.clock() - CrateRoute.RaidChestOpenedAt < 1.5 then task.wait(0.2); return true end
-  if UserConfigs.OpenKeyChest and not CrateRoute.RaidKeyChestDone then
-    CrateRoute.RaidKeyChestDone = true -- one click at most, so this route cannot spend two keys
+  if UserConfigs.OpenKeyChest then
     local premium = chests:FindFirstChild("Premium")
     local title = premium and premium:FindFirstChild("Title")
     local label = title and title.Text or ""
     local countText = string.match(label, "%(([%d,]+)%)")
     local keys = countText and tonumber((string.gsub(countText, ",", ""))) or nil
-    if keys == 0 then
+    if CrateRoute.RaidKeyChestCount then
+      if (keys and keys < CrateRoute.RaidKeyChestCount) or not premium or not premium.Parent then
+        CrateRoute.RaidKeyChestDone = true
+        CrateRoute.RaidKeyChestCount = nil
+        CrateRoute.RaidChestOpenedAt = os.clock()
+        Boot("key chest opened")
+      else
+        FarmStats.Status = "key chest click unconfirmed"
+        task.wait(0.3)
+        return true -- never click Finish or spend a second key while the first click is unconfirmed
+      end
+    elseif not CrateRoute.RaidKeyChestDone and keys == 0 then
+      CrateRoute.RaidKeyChestDone = true
       Boot("key chest skipped: no keys shown")
-    elseif premium and IsObjectVisible(premium) then
+    elseif not CrateRoute.RaidKeyChestDone and premium and title and keys and keys > 0 and string.find(string.upper(label), "OPEN", 1, true) then
       FarmStats.Status = "opening key chest"
+      CrateRoute.RaidKeyChestCount = keys
+      Boot("key chest click attempt: " .. label)
       -- Live hover: (1792,1008) from Premium.AbsolutePosition (1689.6,982.8)
       -- at 2560x1440. Matcha reports zero AbsoluteSize for this button.
       CrateRoute.ClickButton(premium, 0.04, 0.0175)
       task.wait(1)
-      CrateRoute.RaidChestOpenedAt = os.clock() -- let the key chest reveal finish before clicking Finish
-      local after = premium:FindFirstChild("Title")
-      local afterText = after and after.Text or ""
-      local afterCount = string.match(afterText, "%(([%d,]+)%)")
-      local remaining = afterCount and tonumber((string.gsub(afterCount, ",", ""))) or nil
-      Boot((not IsObjectVisible(premium) or (keys and remaining and remaining < keys))
-        and "key chest opened" or "key chest click unconfirmed")
+    elseif not CrateRoute.RaidKeyChestDone then
+      FarmStats.Status = "waiting for key chest OPEN"
+      task.wait(0.3)
+      return true
     end
-    return true
+    if not CrateRoute.RaidKeyChestDone then return true end
+    if os.clock() - CrateRoute.RaidChestOpenedAt < 1.5 then return true end
   end
   local finish = chests:FindFirstChild("Finish")
   if finish and IsObjectVisible(finish) then
