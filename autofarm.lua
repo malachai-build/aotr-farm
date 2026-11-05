@@ -106,6 +106,7 @@ local UserConfigs = {
   AutoReload = true,      -- reload blades / refill gas when they run out
   AutoSkipCutscenes = true, -- press E when the cutscene Skip prompt appears
   AutoRaidChest = true,   -- open the free raid chest, then finish its screen
+  OpenKeyChest = false,   -- optionally spend one key on the right raid chest
   AutoCrates = true,       -- collect and deliver the player-specific Waves crate
   AutoEquipmentUpgrades = true, -- after delivery, buy five rounds of equipment upgrades
   AutoStationUpgrades = true, -- buy Regen first, then HQ Max HP twice; Refills on even waves
@@ -138,7 +139,7 @@ local UserConfigs = {
 }
 local SETTINGS_FILE = "aotr_farm.json"
 local SAVED_KEYS = {
-  "Autofarm", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
+  "Autofarm", "AutoRetry", "AutoReload", "AutoSkipCutscenes", "AutoRaidChest", "OpenKeyChest", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   "HumanSkills", "AwakeningSlot",
@@ -1874,11 +1875,13 @@ end
 -- buttons' AbsolutePosition but reports zero AbsoluteSize, so the hover samples supply
 -- viewport-scaled click offsets. The free button disappears once its chest opens.
 CrateRoute.RaidChestOpenedAt = nil
+CrateRoute.RaidKeyChestDone = false
 function CrateRoute.HandleRaidChest(): boolean
   local chests = Interface:FindFirstChild("Chests")
   if not chests or not IsObjectVisible(chests) then
     if WhatShouldIBeDoing == "chest" then WhatShouldIBeDoing = "attack" end
     CrateRoute.RaidChestOpenedAt = nil
+    CrateRoute.RaidKeyChestDone = false
     return false
   end
   if not UserConfigs.AutoRaidChest then return false end
@@ -1898,6 +1901,29 @@ function CrateRoute.HandleRaidChest(): boolean
   end
   CrateRoute.RaidChestOpenedAt = CrateRoute.RaidChestOpenedAt or os.clock()
   if os.clock() - CrateRoute.RaidChestOpenedAt < 1.5 then task.wait(0.2); return true end
+  if UserConfigs.OpenKeyChest and not CrateRoute.RaidKeyChestDone then
+    CrateRoute.RaidKeyChestDone = true -- one click at most, so this route cannot spend two keys
+    local premium = chests:FindFirstChild("Premium")
+    local title = premium and premium:FindFirstChild("Title")
+    local label = title and title.Text or ""
+    local countText = string.match(label, "%(([%d,]+)%)")
+    local keys = countText and tonumber((string.gsub(countText, ",", ""))) or nil
+    if keys == 0 then
+      Boot("key chest skipped: no keys shown")
+    elseif premium and IsObjectVisible(premium) then
+      FarmStats.Status = "opening key chest"
+      CrateRoute.ClickButton(premium, 0.044, 0.018)
+      task.wait(0.6)
+      CrateRoute.RaidChestOpenedAt = os.clock() -- let the key chest reveal finish before clicking Finish
+      local after = premium:FindFirstChild("Title")
+      local afterText = after and after.Text or ""
+      local afterCount = string.match(afterText, "%(([%d,]+)%)")
+      local remaining = afterCount and tonumber((string.gsub(afterCount, ",", ""))) or nil
+      Boot((not IsObjectVisible(premium) or (keys and remaining and remaining < keys))
+        and "key chest opened" or "key chest click unconfirmed")
+    end
+    return true
+  end
   local finish = chests:FindFirstChild("Finish")
   if finish and IsObjectVisible(finish) then
     FarmStats.Status = "finishing raid chest"
@@ -3092,6 +3118,8 @@ local function buildMenu()
     Tooltip = "Press E when the cutscene Skip prompt appears", Callback = setter("AutoSkipCutscenes") }))
   reg("AutoRaidChest", farm:AddToggle("AutoRaidChest", { Text = "Auto Raid Chest", Default = UserConfigs.AutoRaidChest,
     Tooltip = "Open the free left chest, then click Finish before Retry", Callback = setter("AutoRaidChest") }))
+  reg("OpenKeyChest", farm:AddToggle("OpenKeyChest", { Text = "Open Key Chest", Default = UserConfigs.OpenKeyChest,
+    Tooltip = "Spend one key on the right raid chest after opening the free chest", Callback = setter("OpenKeyChest") }))
   reg("AutoCrates", farm:AddToggle("AutoCrates", { Text = "Auto Crate Delivery", Default = UserConfigs.AutoCrates,
     Tooltip = "Touch your spawned Waves crate, then the drop-off cart",
     Callback = setter("AutoCrates") }))
