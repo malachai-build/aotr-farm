@@ -1426,7 +1426,7 @@ local function PressRetry(): boolean
   -- (1428,1103), while Matcha reports zero AbsoluteSize for this button.
   local x = pos.X + (size.X > 1 and size.X / 2 or viewport.X * 0.018)
   local y = pos.Y + (size.Y > 1 and size.Y / 2 or viewport.Y * 0.0231)
-  local targetX, targetY = math.floor(x), math.floor(y)
+  local targetX, targetY = math.floor(x) + math.random(-2, 2), math.floor(y) + math.random(-2, 2)
   mousemoveabs(targetX, targetY)
   mousemoverel(1, 0)
   local mouse = LocalPlayer:GetMouse()
@@ -1438,10 +1438,10 @@ local function PressRetry(): boolean
     Boot(string.format("retry pointer missed target (%d,%d -> %d,%d)", targetX, targetY, mouse.X, mouse.Y))
     return false
   end
-  task.wait(0.12)
+  task.wait(math.random(10, 20) / 100)
   mouse1click()
   RetryCount += 1
-  task.wait(0.3)
+  task.wait(math.random(25, 40) / 100)
   local started = title and string.find(string.upper(title.Text), "STARTING", 1, true) ~= nil
   Boot(string.format("retry click %d (%s)", RetryCount, started and "starting" or "awaiting response"))
   return started or false
@@ -1889,9 +1889,9 @@ function CrateRoute.ClickButton(Button: Instance, fallbackX: number, fallbackY: 
   local Viewport = Workspace.CurrentCamera.ViewportSize
   local x = Position.X + (Size and Size.X > 1 and Size.X / 2 or Viewport.X * fallbackX)
   local y = Position.Y + (Size and Size.Y > 1 and Size.Y / 2 or Viewport.Y * fallbackY)
-  mousemoveabs(math.floor(x), math.floor(y))
+  mousemoveabs(math.floor(x) + math.random(-2, 2), math.floor(y) + math.random(-2, 2))
   mousemoverel(1, 0) -- Matcha's absolute move alone does not trigger this game's GUI hover.
-  task.wait(0.18)
+  task.wait(math.random(16, 28) / 100)
   mouse1click()
 end
 
@@ -1900,8 +1900,8 @@ function CrateRoute.ClickKeyChest(Button: Instance): boolean
   local Viewport = Workspace.CurrentCamera.ViewportSize
   -- Verified on the live Premium OPEN button: move to (1792,1008), nudge, then
   -- wait for the cursor to settle before sending a separate click.
-  local x = math.floor(Position.X + Viewport.X * 0.04)
-  local y = math.floor(Position.Y + Viewport.Y * 0.0175)
+  local x = math.floor(Position.X + Viewport.X * 0.04) + math.random(-1, 1)
+  local y = math.floor(Position.Y + Viewport.Y * 0.0175) + math.random(-1, 1)
   mousemoveabs(x, y)
   mousemoverel(1, 0)
   local mouse = LocalPlayer:GetMouse()
@@ -1910,7 +1910,7 @@ function CrateRoute.ClickKeyChest(Button: Instance): boolean
     task.wait(0.05)
   end
   if math.abs(mouse.X - x) > 6 or math.abs(mouse.Y - y) > 6 then return false end
-  task.wait(0.4)
+  task.wait(math.random(35, 55) / 100)
   if not isrbxactive() or math.abs(mouse.X - x) > 6 or math.abs(mouse.Y - y) > 6 then return false end
   mouse1click()
   return true
@@ -1925,6 +1925,7 @@ CrateRoute.RaidKeyChestCount = nil
 CrateRoute.RaidKeyChestAttempts = 0
 CrateRoute.RaidKeyChestAttemptAt = nil
 CrateRoute.RaidKeyChestWarned = false
+CrateRoute.RaidKeyChestRetryDelay = nil
 function CrateRoute.HandleRaidChest(): boolean
   local chests = Interface:FindFirstChild("Chests")
   if not chests or not IsObjectVisible(chests) then
@@ -1935,6 +1936,7 @@ function CrateRoute.HandleRaidChest(): boolean
     CrateRoute.RaidKeyChestAttempts = 0
     CrateRoute.RaidKeyChestAttemptAt = nil
     CrateRoute.RaidKeyChestWarned = false
+    CrateRoute.RaidKeyChestRetryDelay = nil
     return false
   end
   if not UserConfigs.AutoRaidChest then return false end
@@ -1968,7 +1970,7 @@ function CrateRoute.HandleRaidChest(): boolean
         Boot("key chest opened")
       else
         FarmStats.Status = "key chest click unconfirmed"
-        if CrateRoute.RaidKeyChestAttempts == 1 and os.clock() - CrateRoute.RaidKeyChestAttemptAt >= 5 and premium and isrbxactive() then
+        if CrateRoute.RaidKeyChestAttempts == 1 and os.clock() - CrateRoute.RaidKeyChestAttemptAt >= CrateRoute.RaidKeyChestRetryDelay and premium and isrbxactive() then
           local pos = premium.AbsolutePosition
           local viewport = Workspace.CurrentCamera.ViewportSize
           local x = math.floor(pos.X + viewport.X * 0.04)
@@ -2001,6 +2003,7 @@ function CrateRoute.HandleRaidChest(): boolean
         CrateRoute.RaidKeyChestCount = keys
         CrateRoute.RaidKeyChestAttempts = 1
         CrateRoute.RaidKeyChestAttemptAt = os.clock()
+        CrateRoute.RaidKeyChestRetryDelay = math.random(45, 65) / 10
         Boot("key chest click attempt: " .. label)
         task.wait(1)
       else
@@ -2365,11 +2368,11 @@ end
 
 function PerkManager.CloseInfo()
   local viewport = Workspace.CurrentCamera.ViewportSize
-  mousemoveabs(math.floor(viewport.X * 0.78), math.floor(viewport.Y * 0.55))
+  mousemoveabs(math.floor(viewport.X * 0.78) + math.random(-2, 2), math.floor(viewport.Y * 0.55) + math.random(-2, 2))
   mousemoverel(1, 0)
-  task.wait(0.2)
+  task.wait(math.random(18, 28) / 100)
   mouse1click()
-  task.wait(0.3)
+  task.wait(math.random(25, 40) / 100)
 end
 
 function PerkManager.Change(card, equip: boolean): boolean
