@@ -1232,12 +1232,12 @@ local function GiveUpToTitan(reason: string?)
 
   local Started = os.clock()
   local LastTp = 0
+  local StartingCharacter = LocalPlayer.Character
 
   while not Stopped() and os.clock() - Started < 30 do
     Progress()
-    local Humanoid = GetPlayerHumanoid(LocalPlayer)
-    local ok, health = pcall(function() return Humanoid.Health end)
-    if not ok or type(health) ~= "number" or health <= 0 then break end
+    local Character = LocalPlayer.Character
+    if not Character or not Character.Parent or not StartingCharacter or Character.Address ~= StartingCharacter.Address then break end
 
     -- Re-teleport every 2s (titans walk); CFrame writes are expensive, so not per frame.
     if os.clock() - LastTp > 2 then
@@ -1666,12 +1666,10 @@ local function BlackBoxLine(): string
   end
   local ok, line = pcall(function()
     local Hrp = GetPlayerHrp(LocalPlayer)
-    local Humanoid = GetPlayerHumanoid(LocalPlayer)
     local p = Hrp and Hrp.Position
     local v = Hrp and Hrp.AssemblyLinearVelocity
     local Target = CurrentTitanTarget
     local TargetHrp = Target and GetTitanHrp(Target)
-    local hp = Humanoid and Humanoid.Health
     local AliveTitans, NearestTitanDist = 0, math.huge
     for _, t in pairs(KnownTitans) do
       if IsTitanAlive(t) then
@@ -1680,11 +1678,10 @@ local function BlackBoxLine(): string
         if th then NearestTitanDist = math.min(NearestTitanDist, (th.Position - p).Magnitude) end
       end
     end
-    return string.format("%s status=%s kills=%d timeouts=%d titansAlive=%d nearestTitan=%s target=%s y=%s speed=%s hp=%s targetDist=%s hoverAge=%.1fs doing=%s writes=%.0f/s skipped=%d",
+    return string.format("%s status=%s kills=%d timeouts=%d titansAlive=%d nearestTitan=%s target=%s y=%s speed=%s targetDist=%s hoverAge=%.1fs doing=%s writes=%.0f/s skipped=%d",
       os.date("%H:%M:%S"), FarmStats.Status, FarmStats.Kills, FarmStats.Timeouts, AliveTitans,
       NearestTitanDist < math.huge and string.format("%.0f", NearestTitanDist) or "-", FarmStats.Target,
       p and string.format("%.0f", p.Y) or "?", v and string.format("%.0f", v.Magnitude) or "?",
-      type(hp) == "number" and string.format("%.0f", hp) or "?",
       (p and TargetHrp) and string.format("%.0f", (TargetHrp.Position - p).Magnitude) or "-",
       os.clock() - LastHoverAt, tostring(WhatShouldIBeDoing), WritesPerSecond, SkippedNapes)
   end)
@@ -1715,10 +1712,13 @@ end
 
 
 local function IsLocalAlive(): boolean
-  local Humanoid = GetPlayerHumanoid(LocalPlayer); if not Humanoid then return false end
-  -- Health reads nil on a humanoid that is being torn down after a death; that crashed the farm.
-  local ok, health = pcall(function() return Humanoid.Health end)
-  return ok and type(health) == "number" and health > 0
+  -- Native Health reads can hang on a stale character even inside pcall. The Retry UI and
+  -- character replacement handle death; presence here is enough to gate combat and station work.
+  local Character = LocalPlayer.Character
+  if not Character or not Character.Parent then return false end
+  local Humanoid = GetPlayerHumanoid(LocalPlayer)
+  local Hrp = GetPlayerHrp(LocalPlayer)
+  return Humanoid ~= nil and Humanoid.Parent ~= nil and Hrp ~= nil and Hrp.Parent ~= nil
 end
 
 
