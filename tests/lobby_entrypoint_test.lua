@@ -1,6 +1,6 @@
 -- Stage both repos' autoexec/farm files at aotr/lobby_test/{normal,raid}_{loader,farm}.lua.
 -- Matcha loadstring chunks discard return values, so assertions run inside each fixture.
-local function run(path, place, exists, lobby, starts)
+local function run(path, place, exists, lobby, starts, preludeOnly)
   local header = string.format([====[
 local calls = { writes = 0, folders = 0, downloads = 0, spawns = 0 }
 local game = { PlaceId = %d, GameId = 4658598196, HttpGet = function()
@@ -32,7 +32,12 @@ assert(calls.downloads == 0 and calls.spawns == 0, "lobby must not start farm")
 assert(calls.downloads == %d and calls.spawns == %d and calls.writes == 0, "mission routing must be preserved")
 ]====], starts and 1 or 0, starts and 1 or 0)
   end
-  assert(loadstring(header .. readfile(path) .. "\nend\nentry()\n" .. checks, path))()
+  local source = readfile(path)
+  if preludeOnly then
+    source = assert(string.match(source, "^(.-)local Stats = {}"), "farm initialization boundary missing")
+    checks = checks .. string.format("assert(calls.folders == %d, 'direct mission startup must create missing aotr folder')\n", exists and 0 or 1)
+  end
+  assert(loadstring(header .. source .. "\nend\nentry()\n" .. checks, path))()
 end
 
 for _, name in ipairs({ "normal", "raid" }) do
@@ -50,4 +55,8 @@ run("aotr/lobby_test/normal_loader.lua", 14638336319, true, false, true)
 run("aotr/lobby_test/raid_loader.lua", 17688739434, true, false, true)
 run("aotr/lobby_test/raid_loader.lua", 14638336319, true, false, false)
 run("aotr/lobby_test/normal_loader.lua", 17688739434, true, false, false)
-print("PASS: main menu, lobby and trade hub, both loaders and direct farms, missing workspace, mission routing")
+for _, exists in ipairs({ false, true }) do
+  run("aotr/lobby_test/normal_farm.lua", 14638336319, exists, false, false, true)
+  run("aotr/lobby_test/raid_farm.lua", 17688739434, exists, false, false, true)
+end
+print("PASS: main menu, lobby and trade hub, both loaders and direct farms, missing workspace, mission routing, direct mission folder creation")
