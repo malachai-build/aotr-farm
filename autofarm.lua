@@ -127,7 +127,8 @@ local UserConfigs = {
   HoverOffsetZ = 0,
   NapeOffsetY = 2,        -- studs; pulled napes sit this far above the player
   SafeHeight = 9999,      -- Y of the reload spot
-  HumanSkills = true,     -- use ready human hotbar skills, six seconds apart
+  HumanSkills = true,     -- use ready human hotbar skills with a short gap between successes
+  AwakeningSlot = 1,     -- Rage Mode / other awakening hotbar slot
   NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
   BossNoKillMinutes = 20, -- the same while a raid boss is alive (bosses never time out)
   AutoQTE = true,         -- press the key a raid quick time event asks for
@@ -138,7 +139,7 @@ local SAVED_KEYS = {
   "Autofarm", "AutoRetry", "AutoReload", "AutoCrates", "AutoEquipmentUpgrades", "AutoStationUpgrades", "AutoPerks", "AutoMarket", "PriorityPerks", "NapeSize", "PullAllNapes", "PullBossLimbs", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
-  "HumanSkills",
+  "HumanSkills", "AwakeningSlot",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -1451,35 +1452,86 @@ local function KeyToVk(text: string?): number?
   return nil
 end
 
--- The human hotbar shows a countdown on each skill. Slot 1 is reserved; use slots 2-5
--- with six seconds between presses so one animation can finish before the next.
-Stats.HumanSkills = { LastPress = -math.huge, LastCheck = -math.huge, NextSlot = 2, ReadyAt = {} }
+-- A skill succeeds when its hotbar countdown starts. Tap it between slashes until that
+-- happens, then wait 2.5 seconds before trying another. The awakening slot is controlled
+-- by the Bar attribute: press once at full charge and never press again while it drains.
+Stats.HumanSkills = { LastSuccess = -math.huge, LastCheck = -math.huge, LastTap = -math.huge,
+  NextSlot = 1, Pending = nil, PendingSince = 0, RetryAfter = {}, LastBar = nil,
+  AwakeningActive = false, Slots = {}, Labels = {}, LabelSince = {} }
 function Stats.UseHumanSkill(): boolean
   if not UserConfigs.HumanSkills then return false end
   local state = Stats.HumanSkills
   local now = os.clock()
-  if now - state.LastPress < 6 or now - state.LastCheck < 1 then return false end
+  if now - state.LastCheck < 0.15 then return false end
   state.LastCheck = now
-  for offset = 0, 3 do
-    local slot = 2 + (state.NextSlot - 2 + offset) % 4
-    local skill = GetPath(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
-    local cooldown = skill and GetPath(skill, false, "Cooldown", "Label") :: TextLabel?
-    local text = cooldown and cooldown.Text
-    local seconds = type(text) == "string" and tonumber(string.match(text, "[%d%.]+")) or nil
-    if seconds then
-      if seconds > 1 then
-        state.ReadyAt[slot] = math.min(state.ReadyAt[slot] or math.huge, now + seconds)
-      elseif now >= (state.ReadyAt[slot] or 0) then
-        local key = GetPath(skill, false, "Key", "Key") :: TextLabel?
-        local vk = KeyToVk(key and key.Text)
-        if vk then
-          state.LastPress = now
-          state.NextSlot = slot == 5 and 2 or slot + 1
-          state.ReadyAt[slot] = now + 6
-          TapKey(vk)
-          Boot(string.format("human skill slot %d (cooldown %s)", slot, text))
-          return true
-        end
+  local bar, max = tonumber(LocalPlayer:GetAttribute("Bar")), tonumber(LocalPlayer:GetAttribute("Max_Bar"))
+  if bar and max and max > 0 then
+    local wasActive = state.AwakeningActive
+    if state.LastBar and bar < state.LastBar - 0.1 and bar > 0 then state.AwakeningActive = true end
+    if bar <= 0.1 then state.AwakeningActive = false end
+    state.LastBar = bar
+    if state.AwakeningActive ~= wasActive then
+      Boot(string.format("awakening %s at %.1f/%.1f bar", state.AwakeningActive and "active" or "empty", bar, max))
+    end
+  end
+  local awakening = math.clamp(math.floor(UserConfigs.AwakeningSlot), 1, 5)
+  local function slotUi(slot)
+    local skill = state.Slots[slot]
+    if not skill or not skill.Parent then
+      skill = GetPath(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
+      state.Slots[slot] = skill
+    end
+    local cooldown = skill and skill:FindFirstChild("Cooldown")
+    local label = cooldown and cooldown:FindFirstChild("Label")
+    local keyFrame = skill and skill:FindFirstChild("Key")
+    local key = keyFrame and keyFrame:FindFirstChild("Key")
+    local text = label and label.Text
+    if text ~= state.Labels[slot] then
+      state.Labels[slot] = text
+      state.LabelSince[slot] = now
+    end
+    return type(text) == "string" and tonumber(string.match(text, "[%d%.]+")) or nil,
+      KeyToVk(key and key.Text), text, now - (state.LabelSince[slot] or now) >= 2
+  end
+  if state.Pending then
+    local slot = state.Pending
+    local seconds, vk, text = slotUi(slot)
+    local activated = slot == awakening and bar and state.BarAtPress and bar < state.BarAtPress - 0.1 and state.AwakeningActive
+    local cooldownStarted = seconds and seconds > 1 and text ~= state.PendingText
+    if (slot ~= awakening and cooldownStarted) or activated then
+      state.LastSuccess = now
+      state.NextSlot = slot % 5 + 1
+      state.Pending = nil
+      Boot(string.format("human skill slot %d confirmed", slot))
+      return true
+    end
+    if now - state.PendingSince > 8 or not vk then
+      state.RetryAfter[slot] = now + 5
+      state.NextSlot = slot % 5 + 1
+      state.Pending = nil
+      return false
+    end
+    if slot == awakening and cooldownStarted then return false end
+    if now - state.LastTap >= 0.2 then
+      state.LastTap = now
+      TapKey(vk)
+    end
+    return false
+  end
+  if now - state.LastSuccess < 2.5 then return false end
+  for offset = 0, 4 do
+    local slot = (state.NextSlot + offset - 1) % 5 + 1
+    local canAwaken = slot ~= awakening or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)
+    if canAwaken and now >= (state.RetryAfter[slot] or 0) then
+      local seconds, vk, text, stable = slotUi(slot)
+      if seconds and (seconds <= 1 or stable) and vk then
+        state.Pending = slot
+        state.PendingText = text
+        state.BarAtPress = slot == awakening and bar or nil
+        state.PendingSince = now
+        state.LastTap = now
+        TapKey(vk)
+        return false
       end
     end
   end
@@ -3016,7 +3068,10 @@ local function buildMenu()
 
   local skills = main:AddLeftGroupbox("Human Skills")
   reg("HumanSkills", skills:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
-    Tooltip = "Use ready hotbar skills 2-5 with six seconds between presses", Callback = setter("HumanSkills") }))
+    Tooltip = "Use ready hotbar skills; wait 2.5 seconds after each confirmed use", Callback = setter("HumanSkills") }))
+  reg("AwakeningSlot", skills:AddSlider("AwakeningSlot", { Text = "Awakening Slot", Default = UserConfigs.AwakeningSlot,
+    Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot for Rage Mode; press only at full bar, then wait until the bar empties and fills again",
+    Callback = setter("AwakeningSlot") }))
 
   local perksTab = win:AddTab("Perk Manager")
   local priorityLeft = perksTab:AddLeftGroupbox("Priority Perks 1-3")
