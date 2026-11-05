@@ -987,7 +987,8 @@ end
 
 local function GetNearestTitan(): Instance?
   local DefenseEren, DefenseHrp = GetDefenseEren()
-  if os.clock() - LastNearestUpdate < (DefenseHrp and 0.5 or 1) and CachedNearestTitan and CachedNearestTitan ~= DefenseEren and CachedNearestTitan.Parent and IsTitanAlive(CachedNearestTitan) and not IsTitanIgnored(CachedNearestTitan) then return CachedNearestTitan end
+  local DefenseAddress = DefenseEren and DefenseEren.Address
+  if os.clock() - LastNearestUpdate < (DefenseHrp and 0.5 or 1) and CachedNearestTitan and CachedNearestTitan.Address ~= DefenseAddress and CachedNearestTitan.Parent and IsTitanAlive(CachedNearestTitan) and not IsTitanIgnored(CachedNearestTitan) then return CachedNearestTitan end
 
   local NearestTitan: Instance? = nil
   local NearestDistance = math.huge
@@ -998,7 +999,7 @@ local function GetNearestTitan(): Instance?
 
   for _, titan in pairs(KnownTitans) do
     if not titan or not titan.Parent then continue end
-    if titan == DefenseEren then continue end
+    if titan.Address == DefenseAddress then continue end
     -- if not titan:IsA("Model") then continue end
     if IsTitanIgnored(titan) then continue end
     if not IsTitanAlive(titan) then continue end
@@ -2747,13 +2748,13 @@ local function KillTitan(titan: Instance)
     local DefenseEren, DefenseHrp = GetDefenseEren()
     if DefenseEren and DefenseHrp then
       local PriorityTitan = GetNearestTitan()
-      if titan == DefenseEren or (PriorityTitan and PriorityTitan ~= titan) then
+      if titan.Address == DefenseEren.Address or (PriorityTitan and PriorityTitan.Address ~= titan.Address) then
         Boot("switching to titan closest to Eren")
         break
       end
     end
     if not IsLocalAlive() then print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
-    if AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
+    if UserConfigs.AutoReload and AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
     -- No per-titan kill timeout (removed at the user's request, 2026-11-03): the farm stays on a
     -- target until it dies. KillTimeout is no longer read. A titan that never
     -- dies is still caught by NoKillMinutes in the main loop, which resets the run.
@@ -2998,15 +2999,11 @@ task.spawn(function() -- The main loop, where the magic happens
     end
 
     Tr.step("main", "blade check")
-    if AreBladesFullyBroken() then
+    if UserConfigs.AutoReload and AreBladesFullyBroken() then
       CurrentTitanTarget = nil
-      if UserConfigs.AutoReload then
-        FarmStats.Status = "reloading"
-        Tr.step("main", "reload")
-        HandleAllReloads()
-      else
-        FarmStats.Status = "blades broken (auto reload off)"
-      end
+      FarmStats.Status = "reloading"
+      Tr.step("main", "reload")
+      HandleAllReloads()
       task.wait(1)
       continue
     end
