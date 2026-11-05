@@ -971,17 +971,34 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
   if SizedNapesCount > 1000 then SizedNapes = {}; SizedNapesCount = 0 end -- titans come and go
 end
 
+local function GetDefenseEren(): (Instance?, BasePart?)
+  if game.PlaceId ~= 14012874501 then return nil, nil end
+  local Objectives = game:GetService("ReplicatedStorage"):FindFirstChild("Objectives")
+  local Defend = Objectives and Objectives:FindFirstChild("Defend_Eren")
+  if not Defend or Defend.Value >= 1 then return nil, nil end
+  local Unclimbable = Workspace:FindFirstChild("Unclimbable")
+  local Objective = Unclimbable and Unclimbable:FindFirstChild("Objective")
+  local ErenObjective = Objective and Objective:FindFirstChild("Defend_Eren")
+  local Reference = ErenObjective and ErenObjective:FindFirstChild("Reference")
+  local Eren = Reference and Reference.Value
+  local ErenHrp = Eren and Eren:FindFirstChild("HumanoidRootPart")
+  return Eren, ErenHrp
+end
+
 local function GetNearestTitan(): Instance?
-  if os.clock() - LastNearestUpdate < 1 and CachedNearestTitan and CachedNearestTitan.Parent and IsTitanAlive(CachedNearestTitan) and not IsTitanIgnored(CachedNearestTitan) then return CachedNearestTitan end
+  local DefenseEren, DefenseHrp = GetDefenseEren()
+  if os.clock() - LastNearestUpdate < (DefenseHrp and 0.5 or 1) and CachedNearestTitan and CachedNearestTitan ~= DefenseEren and CachedNearestTitan.Parent and IsTitanAlive(CachedNearestTitan) and not IsTitanIgnored(CachedNearestTitan) then return CachedNearestTitan end
 
   local NearestTitan: Instance? = nil
   local NearestDistance = math.huge
 
   local PlayerHrp = GetPlayerHrp(LocalPlayer)
-  if not PlayerHrp then return nil end
+  local OriginHrp = DefenseHrp or PlayerHrp
+  if not OriginHrp then return nil end
 
   for _, titan in pairs(KnownTitans) do
     if not titan or not titan.Parent then continue end
+    if titan == DefenseEren then continue end
     -- if not titan:IsA("Model") then continue end
     if IsTitanIgnored(titan) then continue end
     if not IsTitanAlive(titan) then continue end
@@ -989,7 +1006,7 @@ local function GetNearestTitan(): Instance?
     local TitanHrp = GetTitanHrp(titan); if not TitanHrp then continue end
 
     local ok, Distance = pcall(function()
-      return (TitanHrp.Position - PlayerHrp.Position).Magnitude
+      return (TitanHrp.Position - OriginHrp.Position).Magnitude
     end)
 
     if not ok or not Distance then
@@ -2724,6 +2741,16 @@ local function KillTitan(titan: Instance)
       FarmStats.Kills += 1
       print(string.format("[Aotr] %s down after %.1fs", titan.Name:sub(1, 8), os.clock() - StartTime))
       break
+    end
+    -- During Defend Eren, abandon a distant target when another titan gets closer to him.
+    -- After the objective completes, Eren becomes the raid boss and normal targeting resumes.
+    local DefenseEren, DefenseHrp = GetDefenseEren()
+    if DefenseEren and DefenseHrp then
+      local PriorityTitan = GetNearestTitan()
+      if titan == DefenseEren or (PriorityTitan and PriorityTitan ~= titan) then
+        Boot("switching to titan closest to Eren")
+        break
+      end
     end
     if not IsLocalAlive() then print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
     if AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
