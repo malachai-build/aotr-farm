@@ -1413,9 +1413,9 @@ local function PressRetry(): boolean
   local title = button:FindFirstChild("Title") :: TextLabel?
   if title and string.find(string.upper(title.Text), "STARTING", 1, true) then return true end
   local pos, size = button.AbsolutePosition, button.AbsoluteSize
-  -- Live hover on the raid reward screen: (1426,1136) at 2560x1440, relative to
-  -- Retry.AbsolutePosition (1428,1103). Matcha reports zero AbsoluteSize here.
-  local x = pos.X + (size.X > 1 and size.X / 2 or -viewport.X * 0.0012)
+  -- Verified live click: (1475,1136) at 2560x1440. Retry.AbsolutePosition is
+  -- (1428,1103), while Matcha reports zero AbsoluteSize for this button.
+  local x = pos.X + (size.X > 1 and size.X / 2 or viewport.X * 0.018)
   local y = pos.Y + (size.Y > 1 and size.Y / 2 or viewport.Y * 0.0231)
   local targetX, targetY = math.floor(x), math.floor(y)
   mousemoveabs(targetX, targetY)
