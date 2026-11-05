@@ -1417,9 +1417,19 @@ local function PressRetry(): boolean
   -- Retry.AbsolutePosition (1428,1103). Matcha reports zero AbsoluteSize here.
   local x = pos.X + (size.X > 1 and size.X / 2 or -viewport.X * 0.0012)
   local y = pos.Y + (size.Y > 1 and size.Y / 2 or viewport.Y * 0.0231)
-  mousemoveabs(math.floor(x), math.floor(y))
+  local targetX, targetY = math.floor(x), math.floor(y)
+  mousemoveabs(targetX, targetY)
   mousemoverel(1, 0)
-  task.wait(0.18)
+  local mouse = LocalPlayer:GetMouse()
+  local moveDeadline = os.clock() + 1.5
+  while os.clock() < moveDeadline and (math.abs(mouse.X - targetX) > 6 or math.abs(mouse.Y - targetY) > 6) do
+    task.wait(0.05)
+  end
+  if math.abs(mouse.X - targetX) > 6 or math.abs(mouse.Y - targetY) > 6 then
+    Boot(string.format("retry pointer missed target (%d,%d -> %d,%d)", targetX, targetY, mouse.X, mouse.Y))
+    return false
+  end
+  task.wait(0.12)
   mouse1click()
   RetryCount += 1
   task.wait(0.3)
@@ -2805,7 +2815,7 @@ task.spawn(function() -- The main loop, where the magic happens
       FarmStats.Status = "pressing retry"
       DebugPrint("debug", nil, nil, nil, "Detected that the retry button is visible.")
       local retryStarting = PressRetry()
-      task.wait(retryStarting and 0.5 or 3)
+      task.wait(retryStarting and 0.5 or 5)
       continue
     end
     RetryScreenSince = nil
