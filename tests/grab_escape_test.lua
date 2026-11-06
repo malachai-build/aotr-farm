@@ -79,6 +79,6 @@ print("PASS: dynamic grab " .. "VARIANT" .. " sequence >6, random/repeated keys,
 ]====]
   checks = string.gsub(checks, "VARIANT", variant)
   local key = extract(source, "local function KeyToVk(", "-- End prompt key mapping.")
-  local qte = extract(source, "local Qte = {", "--#endregion -- Quick time events --")
-  loadstring(header .. key .. qte .. checks, "grab_" .. variant)()
+  local qte = extract(source, "Qte = {", "--#endregion -- Quick time events --")
+  loadstring(header .. "\nlocal Qte\n" .. key .. qte .. checks, "grab_" .. variant)()
 end
