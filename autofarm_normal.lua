@@ -134,6 +134,9 @@ local UserConfigs = {
   HoverOffsetZ = 0,
   NapeOffsetY = 2,        -- studs; pulled napes sit this far above the player
   SafeHeight = 9999,      -- Y of the reload spot
+  HumanSkills = true,     -- use ready human skills between nape pulling and slashing
+  AwakeningSlot = 1,      -- human awakening/Rage Mode hotbar slot
+  --[====[ Disabled titan shifting settings.
   ShiftEnabled = false,   -- press the titan shifting skill when its Shift Bar can be full
   ShiftKey = 1,           -- hotbar slot (key 1-5) the shifting skill is bound to
   TitanSkills = true,     -- use the five titan skills while shifted
@@ -142,6 +145,7 @@ local UserConfigs = {
   TitanRetreatHp = 0.35,  -- fraction of titan health below which the titan form backs off to the hover
   TitanReturnHp = 0.8,    -- fraction it must heal back to before striking again
   TitanKillTimeout = 25,  -- seconds before giving up on a titan while shifted
+  ]====]
   NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
   BossNoKillMinutes = 20, -- the same while a raid boss is alive (bosses never time out)
   AutoQTE = true,         -- solve visible QTE and grab-escape prompts
@@ -152,7 +156,8 @@ local SAVED_KEYS = {
   "Autofarm", "AutoRetry", "AutoReload", "NapeSize", "PullAllNapes", "PullRadius", "PullCount", "MenuDisabled", "KillTimeout", "AttackDelay", "BobAmplitude",
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
-  "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout",
+  -- "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout", -- Titan shifting disabled.
+  "HumanSkills", "AwakeningSlot",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -538,8 +543,8 @@ local Supplies = { HudAt = -math.huge, NextRefillAt = 0, NextReloadAt = 0, Activ
 
 local CurrentRobloxState = "Active"
 local WhatShouldIBeDoing = "attack"
-local TitanForm = false -- shifted into a titan; set by IsTitanForm, read by the hover and nape pull
-local LastShiftBurstAt = -math.huge -- end of the last shift key burst; the refill waits for it to settle
+local TitanForm = false -- Shifting disabled; legacy diagnostics and hover guards stay in human mode.
+-- local LastShiftBurstAt = -math.huge -- Titan shifting disabled.
 
 local ReloadingBlades: boolean = false
 
@@ -983,6 +988,7 @@ local function TpAboveTitan(titan): boolean -- This might require changes!
   local TitanCache = TitansCache[titan.Address]; if not TitanCache then return false end
   local LocalPlayerCache = CharacterCache[LocalPlayer.Address]; if not LocalPlayerCache then return false end
   local Hrp = GetPlayerHrp(LocalPlayer); if not Hrp then return false end
+  --[====[ Titan-form positioning disabled.
   if TitanForm then
     -- Punches only count when the titan's own body reaches the part. From the hover (~200 studs up)
     -- nothing landed, and a pulled part snaps straight back: each Hitboxes.Hit part is welded to
@@ -1025,6 +1031,8 @@ local function TpAboveTitan(titan): boolean -- This might require changes!
     if not ok then DebugPrint("warn", 0, nil, nil, "Error happened while placing the titan form: " .. tostring(err)) end
     return ok
   end
+
+  ]====]
 
   local x, y, z = GetHoverPoint(titan); if not x then return false end
 
@@ -1314,7 +1322,7 @@ function Supplies.TankPosition()
 end
 
 local function HandleAllReloads()
-  if TitanForm or not Supplies.CanContinue() then return false end
+  if not Supplies.CanContinue() then return false end
   local action, reason = Supplies.Action()
   if not action then return false end
   local hrp = GetPlayerHrp(LocalPlayer)
@@ -1472,6 +1480,7 @@ end
 
 
 
+--[====[ Titan shifting disabled; retained for reference.
 --#region -- Titan shifting --
 -- The shifting skill sits in hotbar slot UserConfigs.ShiftKey (key 1-5). Its Shift Bar is the
 -- player's "Bar" attribute out of "Max_Bar" (100): it fills while dealing damage (0 -> 23 in 20s on
@@ -1616,6 +1625,122 @@ local function UseTitanSkill()
 end
 
 --#endregion -- Titan shifting --
+]====]
+
+--#region -- Human skills --
+local function TapKey(vk: number)
+  keypress(vk)
+  task.wait(0.03)
+  keyrelease(vk)
+end
+
+-- "Q" -> 0x51, "3" -> 0x33; anything else (placeholder "Key", "LMB") -> nil.
+local function KeyToVk(text: string?): number?
+  if type(text) ~= "string" then return nil end
+  text = string.upper((string.gsub(text, "<[^>]*>", "")))
+  text = string.gsub(text, "^%s*(.-)%s*$", "%1")
+  local named = { SPACE = 0x20, SPACEBAR = 0x20, ENTER = 0x0D, RETURN = 0x0D,
+    LEFT = 0x25, UP = 0x26, RIGHT = 0x27, DOWN = 0x28 }
+  if named[text] then return named[text] end
+  if #text ~= 1 then return nil end
+  local b = string.byte(text)
+  return ((b >= 0x30 and b <= 0x39) or (b >= 0x41 and b <= 0x5A)) and b or nil
+end
+-- End prompt key mapping.
+
+-- A skill succeeds when its hotbar countdown starts. Tap it between slashes until that
+-- happens, then wait 2.5 seconds before trying another. The awakening slot is controlled
+-- by the Bar attribute: press once at full charge and never press again while it drains.
+Stats.HumanSkills = { LastSuccess = -math.huge, LastCheck = -math.huge, LastTap = -math.huge,
+  NextSlot = 1, Pending = nil, PendingSince = 0, RetryAfter = {}, LastBar = nil,
+  AwakeningActive = false, Slots = {}, Labels = {}, LabelSince = {} }
+function Stats.UseHumanSkill(burst: boolean?): boolean
+  if not UserConfigs.HumanSkills or not UserConfigs.Autofarm or Stopped() or not IsLocalAlive()
+    or not isrbxactive() or Recovery.Blocked or Qte.Active or Supplies.Active
+    or WhatShouldIBeDoing ~= "attack" or UI.IsInteracting() then return false end
+  local character = LocalPlayer.Character
+  if character and character:GetAttribute("Shifter") ~= nil then return false end
+  if burst then return Stats.Colossal and Stats.Colossal.UseReadySkills() or false end
+  local state = Stats.HumanSkills
+  local now = os.clock()
+  if now - state.LastCheck < 0.15 then return false end
+  state.LastCheck = now
+  local bar, max = tonumber(LocalPlayer:GetAttribute("Bar")), tonumber(LocalPlayer:GetAttribute("Max_Bar"))
+  if bar and max and max > 0 then
+    local wasActive = state.AwakeningActive
+    if state.LastBar and bar < state.LastBar - 0.1 and bar > 0 then state.AwakeningActive = true end
+    if bar <= 0.1 then state.AwakeningActive = false end
+    state.LastBar = bar
+    if state.AwakeningActive ~= wasActive then
+      Boot(string.format("awakening %s at %.1f/%.1f bar", state.AwakeningActive and "active" or "empty", bar, max))
+    end
+  end
+  local awakening = math.clamp(math.floor(UserConfigs.AwakeningSlot), 1, 5)
+  local function slotUi(slot)
+    local skill = state.Slots[slot]
+    if not skill or not skill.Parent then
+      skill = GetPath(Interface, false, "HUD", "Main", "Top", "7", "Hotbar", "Skill_" .. slot)
+      state.Slots[slot] = skill
+    end
+    local cooldown = skill and skill:FindFirstChild("Cooldown")
+    local label = cooldown and cooldown:FindFirstChild("Label")
+    local keyFrame = skill and skill:FindFirstChild("Key")
+    local key = keyFrame and keyFrame:FindFirstChild("Key")
+    local text = label and label.Text
+    if text ~= state.Labels[slot] then
+      state.Labels[slot] = text
+      state.LabelSince[slot] = now
+    end
+    return type(text) == "string" and tonumber(string.match(text, "[%d%.]+")) or nil,
+      KeyToVk(key and key.Text), text, now - (state.LabelSince[slot] or now) >= 2
+  end
+  if state.Pending then
+    local slot = state.Pending
+    local seconds, vk, text = slotUi(slot)
+    local activated = slot == awakening and bar and state.BarAtPress and bar < state.BarAtPress - 0.1 and state.AwakeningActive
+    local cooldownStarted = seconds and seconds > 1 and text ~= state.PendingText
+    if (slot ~= awakening and cooldownStarted) or activated then
+      state.LastSuccess = now
+      state.NextSlot = slot % 5 + 1
+      state.Pending = nil
+      Boot(string.format("human skill slot %d confirmed", slot))
+      return true
+    end
+    if now - state.PendingSince > (burst and 0.3 or 8) or not vk then
+      state.RetryAfter[slot] = now + 5
+      state.NextSlot = slot % 5 + 1
+      state.Pending = nil
+      return false
+    end
+    if slot == awakening and cooldownStarted then return false end
+    if now - state.LastTap >= 0.2 then
+      state.LastTap = now
+      TapKey(vk)
+    end
+    return false
+  end
+  if now - state.LastSuccess < (burst and 0.15 or 2.5) then return false end
+  for offset = 0, 4 do
+    local slot = (state.NextSlot + offset - 1) % 5 + 1
+    local canAwaken = slot ~= awakening or (burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)
+    if canAwaken and now >= (state.RetryAfter[slot] or 0) then
+      local seconds, vk, text, stable = slotUi(slot)
+      if seconds and (seconds <= 1 or stable) and vk then
+        state.Pending = slot
+        state.PendingText = text
+        state.BarAtPress = slot == awakening and bar or nil
+        state.PendingSince = now
+        state.LastTap = now
+        TapKey(vk)
+        return false
+      end
+    end
+  end
+  return false
+end
+
+
+--#endregion -- Human skills --
 
 
 
@@ -1957,8 +2082,8 @@ local function KillTitan(titan: Instance)
     end
     if Recovery.Blocked then break end
     if not IsLocalAlive() then print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
-    local Shifted = IsTitanForm()
-    if UserConfigs.AutoReload and not Shifted and Supplies.Action() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
+    -- local Shifted = IsTitanForm() -- Titan shifting disabled.
+    if UserConfigs.AutoReload and Supplies.Action() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
     -- No per-titan kill timeout (removed at the user's request, 2026-11-03): the farm stays on a
     -- target until it dies. KillTimeout/TitanKillTimeout are no longer read. A titan that never
     -- dies is still caught by NoKillMinutes in the main loop, which resets the run.
@@ -1994,6 +2119,7 @@ local function KillTitan(titan: Instance)
         task.wait(0.05)
         continue
       end
+      --[====[ Titan-form attack path disabled.
       if Shifted and os.clock() - TitanFormSince < SHIFT_CUTSCENE then
         FarmStats.Status = "shifting"
         task.wait(0.1)
@@ -2009,6 +2135,12 @@ local function KillTitan(titan: Instance)
         PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
       end
 
+      ]====]
+      Tr.step("main", "pull napes (write)")
+      PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
+
+      Stats.UseHumanSkill()
+
       Tr.step("main", "slash wait")
       task.wait()
       Tr.step("main", "click")
@@ -2016,6 +2148,7 @@ local function KillTitan(titan: Instance)
       if Recovery.Blocked then continue end
       mouse1click()
       task.wait(0.03)
+      --[====[ Titan skills and automatic shift attempts disabled.
       if Shifted then
         FarmStats.Status = "titan attacking"
         Tr.step("main", "titan skill")
@@ -2029,6 +2162,12 @@ local function KillTitan(titan: Instance)
         Tr.step("main", "try shift")
         TryShift()
       end
+      ]====]
+      Tr.step("main", "space")
+      if UI.IsInteracting() then continue end
+      keypress(0x20)
+      task.wait(0.03)
+      keyrelease(0x20)
     end
   end
   -- Drop the target so the hover stops following a dead or abandoned titan.
@@ -2161,7 +2300,8 @@ task.spawn(function() -- The main loop, where the magic happens
     end
 
     Tr.step("main", "blade check")
-    if UserConfigs.AutoReload and not IsTitanForm() and HandleAllReloads() then
+    -- Titan-form reload exemption disabled; this is the human combat path.
+    if UserConfigs.AutoReload and HandleAllReloads() then
       continue
     end
 
@@ -2525,6 +2665,7 @@ local function buildMenu()
   session:AddButton({ Text = "Reset kill stats", Func = function() FarmStats.Kills, FarmStats.Timeouts = 0, 0 end })
   session:AddButton({ Text = "Unload (End)", Func = Unload })
 
+  --[====[ Titan shifting controls disabled.
   local shifting = main:AddLeftGroupbox("Titan Shifting")
   reg("ShiftEnabled", shifting:AddToggle("ShiftEnabled", { Text = "Auto Shift", Default = UserConfigs.ShiftEnabled,
     Tooltip = "Press the shifting skill when the Shift Bar fills, then fight as the titan",
@@ -2544,6 +2685,14 @@ local function buildMenu()
     Callback = setter("TitanRetreatHp", 100) }))
   reg("TitanKillTimeout", shifting:AddSlider("TitanKillTimeout", { Text = "Titan Give Up After", Default = UserConfigs.TitanKillTimeout,
     Min = 5, Max = 60, Rounding = 0, Suffix = "s", Callback = setter("TitanKillTimeout") }))
+
+  ]====]
+  local skills = main:AddLeftGroupbox("Human Skills")
+  reg("HumanSkills", skills:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
+    Tooltip = "Use ready human skills between slashes; wait 2.5 seconds between confirmed uses", Callback = setter("HumanSkills") }))
+  reg("AwakeningSlot", skills:AddSlider("AwakeningSlot", { Text = "Awakening Slot", Default = UserConfigs.AwakeningSlot,
+    Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot for Rage Mode; press only at full bar, then wait until the bar empties and fills again",
+    Callback = setter("AwakeningSlot") }))
 
   local tuning = win:AddTab("Tuning")
   local attack = tuning:AddLeftGroupbox("Attack")

@@ -45,6 +45,8 @@ Based on Kitty's AoTR script v1.0.7 (@roguekitty).
 
 ## HUD reload test branch
 
+The test branch disables automatic titan transformation. The normal farm retains its former shifting implementation and controls in comments; both farms use the same human-skill logic after nape pulling and before the next slash. Both expose Main / Human Skills controls. Human skill use is blocked during reload/refill, QTE, recovery, menu interaction, or loss of focus.
+
 The local `codex/hud-blade-reload` branch replaces blade transparency checks with the blade HUD fill gradient. It reloads at gradient X from -0.15 through 0, waits for the HUD to return to full, and pauses combat for the action. The no-target safety hover is preserved. Empty spare sets (`0/3`), empty gas, or unreadable HUD data request a bounded refill attempt. Failed attempts resume farming and retry after 20 seconds.
 
 The gradient memory layout is verified for Roblox `version-f0ea5da9412f4e35`; other versions use the unreadable-HUD fallback until verified. The Lua fixture in `tests/hud_reload_test.lua` covers both repositories with mocked input and movement. Stage sources at `aotr/reload_tests/normal.lua` and `raid.lua` before running it. HUD counters also support unnamed text labels and rich text. A two-second startup/unknown-data observation period and a one-second reload settling period prevent transition frames from starting a refill. Refill logs record the triggering reason, gas, spare sets, and gradient. Full live reload/refill cycles remain to be tested before release; public autoexec source pins are unchanged.
