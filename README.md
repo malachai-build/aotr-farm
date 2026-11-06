@@ -47,6 +47,8 @@ Based on Kitty's AoTR script v1.0.7 (@roguekitty).
 
 **Auto QTE / Grab Escape** uses the displayed prompt key for timed QTEs and button-only escape prompts. It releases held keys if disabled and sends no new escape input while Roblox is unfocused. The saved AutoQTE preference is preserved; enable the toggle to use automatic escape.
 
+Ordinary grab escapes scan `Interface.Buttons` for a visible `Main.Key` label every 50 ms. Each prompt supplies its own key; sequences have no fixed order or maximum length. New button instances, label changes, and prompts that disappear and return rearm input. An unchanged prompt retries at a slower rate. Brief gaps keep combat paused; when prompts stop, control returns to the farm. Hidden, unknown, or ambiguous simultaneous prompts send no keys. Regression coverage: `tests/grab_escape_test.lua`.
+
 Character checks run at startup, after HP loss, and during combat. Ragdoll detection reads the actual native Humanoid state using the current client offsets; a persistent character Ragdoll attribute alone never blocks combat. A ragdoll, missing human body parts, or active escape prompt pauses targeting and hover. Damage clears cached character parts. After the game restores an intact character and clears the ragdoll, combat resumes after a short stability check. The script does not force game-owned ragdoll attributes or recreate destroyed body parts.
 
 The farm writes a single `recovering` heartbeat per interrupted episode. The updated watchdog allows 20 seconds for native recovery, then uses its existing Matcha-restart/Retry sequence. Manual Unload still disables recovery. A new server/respawn may still be required if the game's character controller cannot recover.
