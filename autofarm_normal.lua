@@ -55,6 +55,7 @@ if HEARTBEAT_TEST_OFF then Heartbeat("unloaded") end
 -- The heartbeat is written from the menu loop, which outlives a crashed main loop (seen 21:26 on
 -- 2026-11-01: the farm died in GiveUpToTitan and the watchdog kept seeing "farming"). The farm's
 -- own loops call Progress(), and the "farming" beat stops once they have been quiet too long.
+local Recovery = { Blocked = true, CheckedAt = -math.huge, Since = nil, StableAt = nil, Character = nil, Hp = nil, Reason = nil, Braked = false, ReleaseAt = nil }
 local LastProgress = os.clock()
 local PROGRESS_STALL_LIMIT = 30 -- seconds; longer than any single wait inside the farm loops
 -- A dead hover leaves the farm "attacking" from the ground while its loops keep running, so
@@ -66,6 +67,7 @@ local HOVER_DEAD_LIMIT = 15
 local RetryScreenSince: number? = nil
 local RETRY_STUCK_LIMIT = 60
 local function Progress()
+  if Recovery.Blocked then return end
   if HoverDeadSince and os.clock() - HoverDeadSince > HOVER_DEAD_LIMIT then return end
   if RetryScreenSince and os.clock() - RetryScreenSince > RETRY_STUCK_LIMIT then return end
   LastProgress = os.clock()
@@ -141,7 +143,7 @@ local UserConfigs = {
   TitanKillTimeout = 25,  -- seconds before giving up on a titan while shifted
   NoKillMinutes = 5,      -- minutes without a kill before feeding a titan to reset the run
   BossNoKillMinutes = 20, -- the same while a raid boss is alive (bosses never time out)
-  AutoQTE = true,         -- press the key a raid quick time event asks for
+  AutoQTE = true,         -- solve visible QTE and grab-escape prompts
   DebugMode = _G.KittyDebug == true -- was `or true`, which forced it on
 }
 local SETTINGS_FILE = "aotr_farm.json"
@@ -883,6 +885,7 @@ local PULL_MAX_DISTANCE = 600 -- studs from the target beyond which nothing is p
 local PullSlash = 0 -- slashes pulled so far; the extra napes go on every other one
 local SkippedNapes = 0 -- nape writes refused by the live-titan check (black box: skipped=)
 local function PullNapesTo(target: Instance, extra: { Instance }?)
+  if Recovery.Blocked then return end
   local PlayerHrp = GetPlayerHrp(LocalPlayer); if not PlayerHrp then return end
   -- Right after a reload the player is still at the sky spot, 3,000+ studs off, and the first slash
   -- dragged up to PullCount welded napes (and their titans) up there; Matcha froze within seconds
@@ -934,7 +937,7 @@ local function PullNapesTo(target: Instance, extra: { Instance }?)
   if extra and PullSlash % 2 == 0 then
     for _, other in ipairs(extra) do
       task.wait()
-      if Stopped() or not IsValid(PlayerHrp) then break end
+      if Stopped() or Recovery.Blocked or not IsValid(PlayerHrp) then break end
       if IsTitanAlive(other) then Place(other) end
     end
   end
@@ -985,6 +988,7 @@ end
 
 
 local function TpAboveTitan(titan): boolean -- This might require changes!
+  if Recovery.Blocked then return false end
   if not titan or not titan.Parent then return false end
 
   local TitanCache = TitansCache[titan.Address]; if not TitanCache then return false end
@@ -1220,6 +1224,7 @@ end
 -- Stuck (out of blades with no refill, or no kill for minutes): stop hovering, sit on the nearest
 -- titan and let it kill us so the run resets. The game has no reset button.
 local function GiveUpToTitan(reason: string?)
+  if Recovery.Blocked then return end
   reason = reason or "stuck refilling"
   DebugPrint("warn", 0, nil, nil, reason .. ", letting a titan kill us.")
   Boot(reason .. ", feeding a titan")
@@ -1231,7 +1236,7 @@ local function GiveUpToTitan(reason: string?)
   local Started = os.clock()
   local LastTp = 0
 
-  while not Stopped() and os.clock() - Started < 30 do
+  while not Stopped() and not Recovery.Blocked and os.clock() - Started < 30 do
     Progress()
     local Humanoid = GetPlayerHumanoid(LocalPlayer)
     local ok, health = pcall(function() return Humanoid.Health end)
@@ -1260,6 +1265,7 @@ end
 
 
 local function HandleAllReloads()
+  if Recovery.Blocked then return end
   if TitanForm then return end -- a titan has no blades or gas; the HUD reads empty and the refill never ends
   if not AreBladesFullyBroken() then return end
 
@@ -1275,6 +1281,7 @@ local function HandleAllReloads()
     if not RefillStuckSince or os.clock() - RefillLastSeen > 5 then RefillStuckSince = os.clock() end
 
     while true do
+      if Recovery.Blocked then return end
       Progress()
       RefillLastSeen = os.clock()
       if not DoINeedToRefill() then RefillStuckSince = nil; WhatShouldIBeDoing = "attack"; break end
@@ -1498,12 +1505,16 @@ end
 -- "Q" -> 0x51, "3" -> 0x33; anything else (placeholder "Key", "LMB") -> nil.
 local function KeyToVk(text: string?): number?
   if type(text) ~= "string" then return nil end
-  text = string.upper((string.gsub(text, "%s", "")))
+  text = string.upper((string.gsub(text, "<[^>]*>", "")))
+  text = string.gsub(text, "^%s*(.-)%s*$", "%1")
+  local named = { SPACE = 0x20, SPACEBAR = 0x20, ENTER = 0x0D, RETURN = 0x0D,
+    LEFT = 0x25, UP = 0x26, RIGHT = 0x27, DOWN = 0x28 }
+  if named[text] then return named[text] end
   if #text ~= 1 then return nil end
   local b = string.byte(text)
-  if (b >= 0x30 and b <= 0x39) or (b >= 0x41 and b <= 0x5A) then return b end
-  return nil
+  return ((b >= 0x30 and b <= 0x39) or (b >= 0x41 and b <= 0x5A)) and b or nil
 end
+-- End prompt key mapping.
 
 -- The hotbar's Key labels (the titan skills use the same slots), falling back to 1-5.
 local function ReadTitanSkillKeys(): string
@@ -1639,8 +1650,8 @@ local Qte = {
 local LastQteLookup = 0
 local function FindQteUi()
   if not UserConfigs.AutoQTE then return end -- the menu's Auto Quick Time Events toggle
-  if Qte.Frame and Qte.Frame.Parent then return end
-  -- Only raids have it; elsewhere this was a lookup and a yield on every main loop pass.
+  if Qte.Frame and Qte.Frame.Parent and Qte.Key and Qte.Key.Parent then return end
+  -- Shared QTE/grab prompt; find it from the yielding main loop, not the render callback.
   if os.clock() - LastQteLookup < 2 then return end
   LastQteLookup = os.clock()
   Qte.Frame = GetPath(Interface, false, "QTE")
@@ -1652,23 +1663,41 @@ local function QteTick()
   local now = os.clock()
   if Qte.ReleaseAt and now >= Qte.ReleaseAt then pcall(keyrelease, Qte.Vk); Qte.ReleaseAt = nil end
   -- Switched off mid-QTE, Active would stay set and hold KillTitan in "quick time event".
-  if not UserConfigs.AutoQTE then Qte.Active = false; return end
-  if not Qte.Frame or not Qte.Timing then return end
+  if not UserConfigs.AutoQTE then
+    if Qte.ReleaseAt and Qte.Vk then pcall(keyrelease, Qte.Vk) end
+    Qte.ReleaseAt, Qte.Active, Qte.PressedAt = nil, false, nil
+    return
+  end
+  if not Qte.Frame or not Qte.Frame.Parent then Qte.Active = false; return end
   local visible = IsObjectVisible(Qte.Frame)
   if not visible then
     if Qte.Active then
-      Qte.Active = false
+      Qte.Active, Qte.PressedAt, Qte.LastScale = false, nil, nil
       Qte.Count += 1
       if Qte.Count <= 5 then Boot(string.format("QTE %d over after %.2fs: %s", Qte.Count, now - Qte.Since, table.concat(Qte.Trace, " "))) end
     end
     return
   end
-  local scale = memory_read("float", Qte.Timing.Address + SizeOffset) -- Size.X.Scale
   local text = Qte.Key and Qte.Key.Text
+  if not Qte.Active then Qte.Since, Qte.Trace = now, {} end
+  if not isrbxactive() then Qte.Active = true; Qte.PressedAt = nil; return end
+  -- Button-only escape prompts have no animated Timing frame. Repeat only the displayed key.
+  if not Qte.Timing or not Qte.Timing.Parent then
+    Qte.Active = true
+    if Qte.ReleaseAt then return end
+    local vk = KeyToVk(text)
+    if vk and (not Qte.PressedAt or now - Qte.PressedAt >= 0.4) then
+      Qte.Vk, Qte.PressedAt = vk, now
+      pcall(keypress, vk); Qte.ReleaseAt = now + 0.05
+    end
+    return
+  end
+  local scale = memory_read("float", Qte.Timing.Address + SizeOffset) -- Size.X.Scale
   -- One QTE is a chain of prompts (16s on the Female Titan raid): Timing shrinks 5 -> 1 in ~0.45s,
   -- then jumps back up, maybe with a new key. Each jump or key change is a new prompt to answer.
   local newPrompt = Qte.Active and ((Qte.LastScale and scale > Qte.LastScale + 0.5) or text ~= Qte.PromptKey)
   if not Qte.Active or newPrompt then
+    if Qte.ReleaseAt and Qte.Vk then pcall(keyrelease, Qte.Vk); Qte.ReleaseAt = nil end
     if not Qte.Active then Qte.Since = now; Qte.Trace = {} end
     Qte.Active, Qte.PromptAt, Qte.PressedAt, Qte.LastMove, Qte.LastScale = true, now, nil, now, scale
     Qte.PromptKey = text
@@ -1689,6 +1718,94 @@ local function QteTick()
 end
 
 --#endregion -- Quick time events --
+
+-- Character state is sampled at startup and continuously; damage invalidates cached parts.
+-- Do not fight a grab/ragdoll by teleporting its root. Give the game time to restore control.
+-- Read the actual native humanoid state using this client's loaded offsets.
+-- The character's Ragdoll attribute is not sufficient evidence of an active ragdoll.
+function Recovery.ReadState(humanoid)
+  local fields = Offsets.Humanoid
+  if not humanoid or not fields or type(fields.HumanoidState) ~= "number"
+    or type(fields.HumanoidStateID) ~= "number" then return nil end
+  local ok, value = pcall(function()
+    local pointer = memory_read("uintptr_t", humanoid.Address + fields.HumanoidState)
+    if type(pointer) ~= "number" or pointer < 65536 or pointer >= 140737488355328 then return nil end
+    local state = memory_read("int", pointer + fields.HumanoidStateID)
+    if type(state) == "number" and state >= 0 and state <= 18 then return state end
+  end)
+  return ok and value or nil
+end
+
+function Recovery.Tick()
+  local now = os.clock()
+  if Recovery.ReleaseAt and now >= Recovery.ReleaseAt then
+    pcall(keyrelease, 0x20); Recovery.ReleaseAt = nil
+  end
+  if now - Recovery.CheckedAt < 0.2 then return end
+  Recovery.CheckedAt = now
+  if not UserConfigs.Autofarm then Recovery.Blocked = false; Recovery.Since = nil; return end
+  local character = LocalPlayer.Character
+  local address = character and character.Address
+  local humanoid = character and GetHumanoid(character)
+  local root = character and GetHrp(character)
+  local ok, hp = pcall(function() return humanoid and humanoid.Health end)
+  if not ok then hp = nil end
+  local damaged = address == Recovery.Character and type(hp) == "number" and type(Recovery.Hp) == "number" and hp < Recovery.Hp - 0.01
+  if address ~= Recovery.Character or damaged then
+    local cache = CharacterCache[LocalPlayer.Address]
+    if cache then cache.Character, cache.Hrp, cache.Humanoid = character, nil, nil end
+    if damaged then Boot(string.format("damage %.1f -> %.1f; checking character state", Recovery.Hp, hp)) end
+  end
+  if address ~= Recovery.Character then
+    Recovery.Since, Recovery.StableAt, Recovery.Braked = nil, nil, false
+  end
+  Recovery.Character, Recovery.Hp = address, hp
+  local nativeState = Recovery.ReadState(humanoid)
+  Recovery.NativeState = nativeState
+  local reason
+  if not character or not character.Parent or not root or not root.Parent or type(hp) ~= "number" then
+    reason = "waiting for character"
+  elseif hp <= 0 then
+    reason = "dead character"
+  elseif not TitanForm and character:GetAttribute("Shifter") == nil and (not character:FindFirstChild("Head") or not character:FindFirstChild("UpperTorso")) then
+    reason = "incomplete character body"
+  elseif Qte.Active then
+    reason = "escape / quick time event"
+  elseif nativeState == 0 or nativeState == 1 or nativeState == 2 or nativeState == 14 then
+    reason = "ragdoll"
+  end
+  if reason then
+    if not Recovery.Blocked or not Recovery.Since then
+      Recovery.Since = now
+      Recovery.Braked = false
+      Heartbeat("recovering") -- one marker: its age measures the whole recovery attempt
+    end
+    if Recovery.Reason ~= reason then Boot("character recovery: " .. reason) end
+    Recovery.Blocked, Recovery.Reason, Recovery.StableAt = true, reason, nil
+    CurrentTitanTarget = nil
+    FarmStats.Target, FarmStats.Status = "none", "recovering: " .. reason
+    -- One brake per episode, only for a real ragdoll; never teleport or force attributes.
+    if reason == "ragdoll" and not Recovery.Braked and root then
+      Recovery.Braked = true
+      pcall(function() root.AssemblyLinearVelocity = Vector3Zero end)
+    end
+    return
+  end
+  if Recovery.Blocked then
+    Recovery.StableAt = Recovery.StableAt or now
+    if now - Recovery.StableAt < 0.4 then return end
+    Boot("character recovery complete; resuming combat")
+    if Recovery.Reason == "ragdoll" and isrbxactive() and not Qte.Active then
+      pcall(keypress, 0x20); Recovery.ReleaseAt = now + 0.05
+    end
+    Recovery.Blocked, Recovery.Since, Recovery.Reason = false, nil, nil
+    LastProgress = now
+    Heartbeat("farming")
+  end
+end
+-- End character recovery monitor.
+
+
 
 
 
@@ -1755,6 +1872,7 @@ end
 
 
 local function IsLocalAlive(): boolean
+  if Recovery.Blocked then return false end
   local Humanoid = GetPlayerHumanoid(LocalPlayer); if not Humanoid then return false end
   -- Health reads nil on a humanoid that is being torn down after a death; that crashed the farm.
   local ok, health = pcall(function() return Humanoid.Health end)
@@ -1794,6 +1912,7 @@ local function KillTitan(titan: Instance)
       print(string.format("[Aotr] %s down after %.1fs", titan.Name:sub(1, 8), os.clock() - StartTime))
       break
     end
+    if Recovery.Blocked then break end
     if not IsLocalAlive() then print("[Aotr] died while attacking " .. titan.Name:sub(1, 8)); LogDeath("attacking " .. titan.Name:sub(1, 8)); FarmStats.Status = "dead, waiting to respawn"; break end
     local Shifted = IsTitanForm()
     if UserConfigs.AutoReload and not Shifted and AreBladesFullyBroken() then DebugPrint("debug", 3, nil, "KillTitan", "Blades broken"); break end
@@ -1851,6 +1970,7 @@ local function KillTitan(titan: Instance)
       task.wait()
       Tr.step("main", "click")
       if UI.IsInteracting() then continue end
+      if Recovery.Blocked then continue end
       mouse1click()
       task.wait(0.03)
       if Shifted then
@@ -1947,7 +2067,7 @@ task.spawn(function() -- The main loop, where the magic happens
     -- A stuck mission keeps a fresh heartbeat (5 hours on 2026-11-02), so after NoKillMinutes
     -- without a kill the character feeds itself to a titan and the run resets. A raid boss takes
     -- minutes to kill, so while one is alive the limit is BossNoKillMinutes.
-    local Idle = FarmStats.Status == "paused" or FarmStats.Status == "pressing retry" or FarmStats.Status == "dead, waiting to respawn"
+    local Idle = Recovery.Blocked or FarmStats.Status == "paused" or FarmStats.Status == "pressing retry" or FarmStats.Status == "dead, waiting to respawn"
     if FarmStats.Kills ~= LastKills or Idle then
       LastKills, LastKillAt = FarmStats.Kills, os.clock()
     else
@@ -1979,6 +2099,14 @@ task.spawn(function() -- The main loop, where the magic happens
       continue
     end
     RetryScreenSince = nil
+
+    Recovery.Tick()
+    if Recovery.Blocked then
+      CurrentTitanTarget = nil
+      FarmStats.Status = "recovering: " .. (Recovery.Reason or "checking character")
+      task.wait(0.2)
+      continue
+    end
 
     if not IsLocalAlive() then
       CurrentTitanTarget = nil
@@ -2070,6 +2198,7 @@ local HOVER_INTERVAL = 0.05 -- seconds between hover CFrame writes (20 a second)
 local RenderConn
 
 local function HoverStep()
+  if Recovery.Blocked then return end
   if not UserConfigs.Autofarm or WhatShouldIBeDoing ~= "attack" then return end
   -- The reload spot is the skybox (SafeHeight); a titan parked there got stuck (2026-11-02) while
   -- its bar drained, so in titan form keep hovering over the target, or hold still with none.
@@ -2115,6 +2244,12 @@ local function OnRenderStepped()
   Tr.step("render", "qte")
   local okQte, qteErr = pcall(QteTick)
   if not okQte and os.clock() - LastHoverError > 5 then LastHoverError = os.clock(); Boot("qte tick error: " .. tostring(qteErr)) end
+  local stateOk, stateErr = pcall(Recovery.Tick)
+  if not stateOk then
+    if not Recovery.Since then Recovery.Since = os.clock(); Heartbeat("recovering") end
+    Recovery.Blocked = true
+    if os.clock() - LastHoverError > 5 then LastHoverError = os.clock(); Boot("character state error: " .. tostring(stateErr)) end
+  end
   Tr.step("render", "status")
   local okTick, tickErr = pcall(StatusTick)
   if not okTick and os.clock() - LastHoverError > 5 then LastHoverError = os.clock(); Boot("status tick error: " .. tostring(tickErr)) end
@@ -2231,6 +2366,9 @@ local function syncControl(id, value)
 end
 
 local function Unload()
+  if _G.AotrRunId ~= RunId then return end -- an old UI must not overwrite the new run's heartbeat
+  if Qte.ReleaseAt and Qte.Vk then pcall(keyrelease, Qte.Vk); Qte.ReleaseAt = nil end
+  if Recovery.ReleaseAt then pcall(keyrelease, 0x20); Recovery.ReleaseAt = nil end
   if _G.AotrRunId == RunId then _G.AotrStop = true end
   CurrentTitanTarget = nil
   UI.unloading = true
@@ -2293,8 +2431,8 @@ local function buildMenu()
   reg("AutoReload", farm:AddToggle("AutoReload", { Text = "Auto Reload / Refill", Default = UserConfigs.AutoReload,
     Tooltip = "Reload blades at the safe spot; refill at the gas tank on maps the script knows",
     Callback = setter("AutoReload") }))
-  reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto Quick Time Events", Default = UserConfigs.AutoQTE,
-    Tooltip = "Press the key a raid quick time event shows", Callback = setter("AutoQTE") }))
+  reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto QTE / Grab Escape", Default = UserConfigs.AutoQTE,
+    Tooltip = "Solve visible QTE and grab-escape prompts using their displayed key", Callback = setter("AutoQTE") }))
   reg("NoKillMinutes", farm:AddSlider("NoKillMinutes", { Text = "Reset After No Kill", Default = UserConfigs.NoKillMinutes,
     Min = 2, Max = 30, Rounding = 0, Suffix = " min", Tooltip = "Feed a titan to restart a stuck run",
     Callback = setter("NoKillMinutes") }))
@@ -2450,7 +2588,7 @@ StatusTick = function()
   end
   -- Every second: the watchdog restarts a hung Matcha once this is 5s old, and the character
   -- outlives a hang by ~30s (2026-11-01 deaths), so a 5s beat wasted most of that margin.
-  if os.clock() - lastBeat >= 1 and os.clock() - LastProgress < PROGRESS_STALL_LIMIT then
+  if os.clock() - lastBeat >= 1 and not Recovery.Blocked and os.clock() - LastProgress < PROGRESS_STALL_LIMIT then
     Tr.step("render", "heartbeat write")
     lastBeat = os.clock(); Heartbeat("farming")
   end

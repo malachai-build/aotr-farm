@@ -21,7 +21,7 @@ over); retries wait while Matcha is down. Matcha can also stall without exiting 
 silent mid-mission, so Retry has nothing to press), or come back after a teleport without running
 auto-exec. So with -RestartMatcha a stale heartbeat first restarts app.exe (rerunning auto-exec),
 then presses Retry -RestartAfterAttempts times, then restarts again, and so on. A hung Matcha window
-(-HungSeconds) is restarted too. After every start it presses Right arrow to close Matcha's
+(-HungSeconds) is restarted too. After every start it uses the saved Matcha menu key (Insert by default) to close the
 overlay, which otherwise blocks the farm's clicks.
 
 It also asks Matcha's MCP (http://127.0.0.1:8765/mcp) where it is. In the lobby it stands down.
@@ -49,8 +49,10 @@ param(
   [int]$ScriptStaleSeconds = 20, # in a mission with the MCP up: farm silence before acting (the farm beats every 5s)
   [int]$McpDownSeconds = 20,   # with -RestartMatcha: MCP and farm both silent this long -> act without waiting for StaleSeconds
   [int]$PollSeconds = 2,       # main loop interval
+  [ValidateRange(0, 254)][int]$OverlayKey = 0, # 0 = saved Matcha menukey, falling back to Insert
   [int]$OverlaySeconds = 15,   # close Matcha's overlay once it has stayed open this long
   [int]$FastStaleSeconds = 5,  # with -RestartMatcha: restart Matcha once a "farming" heartbeat is this old (the farm beats every 1s)
+  [int]$CharacterRecoverySeconds = 20, # allow the game to clear a grab/ragdoll before watchdog recovery
   [int]$RetryStuckSeconds = 45, # restart a farm that keeps heartbeating on the Retry screen
   [switch]$TryScriptRestart,   # first try starting the farm through the MCP (0 of 3 attempts worked on 2026-11-01)
   [switch]$RestartOnTeleport,  # close Matcha when Roblox starts a teleport, start it fresh once the new server is joined
@@ -196,6 +198,29 @@ function Find-MatchaExe {
   throw "Matcha app.exe not found in running processes or nearby install folders.$hint Pass -MatchaExe <full path to app.exe> for an unusual install."
 }
 
+function Get-OverlayKeyInfo {
+  if ($OverlayKey -gt 0) { return [pscustomobject]@{ VirtualKey = $OverlayKey; Source = '-OverlayKey override' } }
+  $paths = @()
+  if ($WorkspaceRoot) { $paths += Join-Path (Split-Path -Parent $WorkspaceRoot) 'global.cfg' }
+  if ($MatchaExe) {
+    $folder = Split-Path -Parent $MatchaExe
+    $paths += Join-Path $folder 'global.cfg'
+    $paths += Join-Path (Split-Path -Parent $folder) 'global.cfg'
+  }
+  $paths += 'C:\matcha\global.cfg'
+  foreach ($path in ($paths | Select-Object -Unique)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+    try {
+      $config = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+      $key = 0
+      if ([int]::TryParse([string]$config.menukey, [ref]$key) -and $key -gt 0 -and $key -le 254) {
+        return [pscustomobject]@{ VirtualKey = $key; Source = $path }
+      }
+    } catch {}
+  }
+  return [pscustomobject]@{ VirtualKey = 0x2D; Source = 'Matcha default (Insert)' }
+}
+
 function Find-WorkspaceRoot {
   $explicit = if ($WorkspaceRoot) { $WorkspaceRoot } elseif ($env:MATCHA_WORKSPACE) { $env:MATCHA_WORKSPACE } elseif ($Heartbeat) { Split-Path -Parent (Split-Path -Parent $Heartbeat) }
   if ($explicit -and -not (Test-Path -LiteralPath $explicit -PathType Container)) {
@@ -285,6 +310,8 @@ public static class AotrWin {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int index);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint mapType);
 }
 "@
 
@@ -330,36 +357,68 @@ function Get-MatchaProc {
   Get-Process -Name $exe -ErrorAction SilentlyContinue | Where-Object { ($_.Path -eq $MatchaExe -or -not $_.Path) -and $_.MainWindowHandle -ne [IntPtr]::Zero -and $_.Responding } | Select-Object -First 1
 }
 
-# Matcha's window is a topmost layered window; with the overlay closed it is click-through
-# (WS_EX_TRANSPARENT, 0x20), with it open it takes the clicks and keys meant for Roblox.
+# Refresh the process before each style read; an invalid/replaced window is unknown, not closed.
 function Test-OverlayOpen($m) {
-  if (-not $m) { return $false }
-  return (([AotrWin]::GetWindowLong($m.MainWindowHandle, -20) -band 0x20) -eq 0)
+  if (-not $m) { return $null }
+  try { $m.Refresh() } catch { return $null }
+  $handle = $m.MainWindowHandle
+  if ($handle -eq [IntPtr]::Zero -or -not [AotrWin]::IsWindow($handle)) { return $null }
+  return (([AotrWin]::GetWindowLong($handle, -20) -band 0x20) -eq 0)
 }
 
-# Right arrow toggles the overlay, so press it only while it is open and check after each press.
-# A single unchecked press at 2s left it open after the 00:13 restart (2026-11-02) and the farm
-# sat on the Retry screen for 7 minutes.
+function Send-OverlayToggle([int]$key) {
+  $scan = [byte][AotrWin]::MapVirtualKey([uint32]$key, 0)
+  $flags = if ($key -in @(0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x2D,0x2E)) { 1 } else { 0 }
+  [AotrWin]::keybd_event([byte]$key, $scan, [uint32]$flags, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 150
+  [AotrWin]::keybd_event([byte]$key, $scan, [uint32]($flags -bor 2), [UIntPtr]::Zero)
+}
+
+# Use the user's saved menu toggle; Insert is the default. Read it again if changed while running.
 function Close-Overlay($m) {
-  for ($try = 1; $try -le 4; $try++) {
-    if (-not (Test-OverlayOpen $m)) { break }
-    # Matcha only takes the key while its own window is focused; Right arrow is an extended key.
+  $keyInfo = Get-OverlayKeyInfo
+  $presses = 0
+  $closed = $false
+  for ($try = 1; $try -le 6; $try++) {
+    $m = Get-MatchaProc
+    $open = Test-OverlayOpen $m
+    if ($null -eq $open) { Write-Log 'Matcha overlay window unavailable; close could not be verified'; break }
+    if (-not $open) { $closed = $true; break }
     if (Focus-Window $m) {
-      [AotrWin]::keybd_event(0x27, 0x4D, 1, [UIntPtr]::Zero); Start-Sleep -Milliseconds 150
-      [AotrWin]::keybd_event(0x27, 0x4D, 3, [UIntPtr]::Zero)
+      Send-OverlayToggle $keyInfo.VirtualKey
+      $presses++
     }
-    Start-Sleep -Milliseconds 800
+    Start-Sleep -Milliseconds 500
   }
-  $open = Test-OverlayOpen $m
-  if ($open) { Write-Log "Matcha overlay still open after $($try - 1) Right arrow presses" } else { Write-Log "closed Matcha overlay (Right arrow, checked)" }
-  # Hand focus back so the farm (which waits for Roblox focus) can act.
+  if (-not $closed) {
+    $open = Test-OverlayOpen (Get-MatchaProc)
+    $closed = ($null -ne $open -and -not $open)
+  }
+  if ($closed) {
+    Write-Log ("Matcha overlay closed (verified; key VK 0x{0:X2}, {1} presses; {2})" -f $keyInfo.VirtualKey, $presses, $keyInfo.Source)
+  } else {
+    Write-Log ("Matcha overlay close unverified after {0} presses (key VK 0x{1:X2}; {2})" -f $presses, $keyInfo.VirtualKey, $keyInfo.Source)
+  }
   $roblox = Get-Process RobloxPlayerBeta -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } | Select-Object -First 1
   if ($roblox) { Focus-Window $roblox | Out-Null }
-  return (-not $open)
+  return $closed
+}
+
+function Stop-TeleportMatcha {
+  if ($DryRun) { return }
+  $exe = [IO.Path]::GetFileNameWithoutExtension($MatchaExe)
+  Get-Process -Name $exe -ErrorAction SilentlyContinue |
+    Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe } |
+    ForEach-Object {
+      $target = $_
+      try { $target | Stop-Process -Force -ErrorAction Stop }
+      catch { Write-Log "Could not stop Matcha PID $($target.Id): $($_.Exception.Message)" }
+    }
 }
 
 function Start-Matcha {
   Start-Process -FilePath $MatchaExe -WorkingDirectory (Split-Path $MatchaExe)
+  $script:overlayStartupUntil = (Get-Date).AddSeconds(30)
   # A fresh Matcha opens its overlay, which swallows the farm's clicks.
   $deadline = (Get-Date).AddSeconds(20)
   do {
@@ -369,7 +428,7 @@ function Start-Matcha {
   if (-not $m) { Write-Log "Matcha window did not appear to close its overlay"; return }
   # The overlay can open a moment after the window does; give it up to 5s.
   $deadline = (Get-Date).AddSeconds(5)
-  while (-not (Test-OverlayOpen $m) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+  while ((Test-OverlayOpen $m) -ne $true -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250; $m = Get-MatchaProc }
   Close-Overlay $m | Out-Null
 }
 
@@ -415,6 +474,8 @@ if ($ValidateOnly) {
     FarmSources = $farmSources -join ', '
     RobloxLogDir = $RobloxLogDir
     ScriptRestartAvailable = [bool]$StartFarmLua
+    OverlayKey = (Get-OverlayKeyInfo).VirtualKey
+    OverlayKeySource = (Get-OverlayKeyInfo).Source
   }
   return
 }
@@ -442,6 +503,7 @@ $retriesSinceMatcha = $null # null until the first Matcha restart of a stall
 $lastReported = ""
 $hungSince = $null
 $overlaySince = $null
+$script:overlayStartupUntil = (Get-Date).AddSeconds(30)
 $currentJob = ""
 $jobSince = Get-Date
 $mcpDownSince = $null
@@ -475,7 +537,7 @@ function Read-RobloxLog {
 if ($RestartOnTeleport) { [void](Read-RobloxLog) } # start at the end of the current log
 
 while ($true) {
-  Start-Sleep -Seconds $PollSeconds
+  if ($teleportSince) { Start-Sleep -Milliseconds 100 } else { Start-Sleep -Seconds $PollSeconds }
   # -RestartOnTeleport: Matcha's own reload after a teleport is the unreliable step (it hangs or
   # skips auto-exec), so close it as the teleport starts and launch a fresh one, which runs
   # auto-exec reliably, once Roblox has joined the next server.
@@ -484,17 +546,20 @@ while ($true) {
       if ($l -match 'doTeleport: url' -and -not $teleportSince) {
         $teleportSince = Get-Date; $joinSeen = $false
         Write-Log "teleport started - closing Matcha until the next server is joined"
-        if (-not $DryRun) { Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($MatchaExe)) -ErrorAction SilentlyContinue | Where-Object { -not $_.Path -or $_.Path -eq $MatchaExe } | Stop-Process -Force }
+        Stop-TeleportMatcha
       } elseif ($teleportSince -and $l -match "Joining game '([0-9a-f-]+)' place (\d+)") {
         $joinSeen = $true; $joinInfo = "$($Matches[1].Substring(0,8)) place $($Matches[2])"
       } elseif ($teleportSince -and $joinSeen -and $l -match 'Replicator created for player') {
         Write-Log ("joined {0} after {1:N0}s - starting Matcha" -f $joinInfo, ((Get-Date) - $teleportSince).TotalSeconds)
         $teleportSince = $null
+        Stop-TeleportMatcha
         if (-not $DryRun) { Start-Matcha }
         $lastAction = Get-Date; $attempts = 0; $retriesSinceMatcha = $null; $lastReported = ""
       }
     }
     if ($teleportSince) {
+      # Matcha may respawn itself during the loading screen. Keep it closed until our launch.
+      Stop-TeleportMatcha
       if (((Get-Date) - $teleportSince).TotalSeconds -lt $JoinTimeoutSeconds) { continue }
       Write-Log ("no join in Roblox's log after {0}s - starting Matcha anyway" -f $JoinTimeoutSeconds)
       $teleportSince = $null
@@ -540,6 +605,17 @@ while ($true) {
   }
   $hungSince = $null
 
+  # An overlay left open (or reopened) blocks the farm's input; close it once it has stayed open
+  # OverlaySeconds, which leaves time to use the menu by hand.
+  if ($matcha.MainWindowHandle -ne [IntPtr]::Zero -and (Test-OverlayOpen $matcha)) {
+    if (-not $overlaySince) { $overlaySince = Get-Date }
+    if (-not $DryRun -and ((Get-Date) -lt $script:overlayStartupUntil -or ((Get-Date) - $overlaySince).TotalSeconds -ge $OverlaySeconds)) {
+      Write-Log ("Matcha overlay open {0:N0}s - closing it" -f ((Get-Date) - $overlaySince).TotalSeconds)
+      Close-Overlay $matcha | Out-Null
+      $overlaySince = $null
+    }
+  } else { $overlaySince = $null }
+
   if (-not $heartbeatSeen) {
     if (Test-Path -LiteralPath $Heartbeat -PathType Leaf) {
       $heartbeatSeen = $true
@@ -551,17 +627,6 @@ while ($true) {
       continue
     }
   }
-
-  # An overlay left open (or reopened) blocks the farm's input; close it once it has stayed open
-  # OverlaySeconds, which leaves time to use the menu by hand.
-  if ($matcha.MainWindowHandle -ne [IntPtr]::Zero -and (Test-OverlayOpen $matcha)) {
-    if (-not $overlaySince) { $overlaySince = Get-Date }
-    if (((Get-Date) - $overlaySince).TotalSeconds -ge $OverlaySeconds -and -not $DryRun) {
-      Write-Log ("Matcha overlay open {0:N0}s - closing it" -f ((Get-Date) - $overlaySince).TotalSeconds)
-      Close-Overlay $matcha | Out-Null
-      $overlaySince = $null
-    }
-  } else { $overlaySince = $null }
 
   $age = [double]::MaxValue
   $state = ""
@@ -608,7 +673,7 @@ while ($true) {
     $limit = $ScriptStaleSeconds
   } else {
     # MCP down: fall back to the heartbeat alone, as before.
-    if ($state -ne "farming") {
+    if ($state -ne "farming" -and $state -ne "recovering") {
       if ($lastReported -ne "mcpdown-$state") { Write-Log "Matcha MCP not answering, farm state '$state', standing down"; $lastReported = "mcpdown-$state" }
       $attempts = 0
       continue
@@ -618,6 +683,13 @@ while ($true) {
     # A reload that never brings the MCP or the farm back (seen 21:09, 2026-11-01) left the
     # character undefended for the full StaleSeconds.
     if ($RestartMatcha -and ((Get-Date) - $mcpDownSince).TotalSeconds -ge $McpDownSeconds) { $limit = $McpDownSeconds }
+  }
+
+  # The farm writes this marker once per recovery episode. Fresh loop activity must not
+  # conceal a ragdoll/incomplete body; allow a short grace period, then use normal recovery.
+  if ($state -eq 'recovering') {
+    $stale = $age
+    $limit = $CharacterRecoverySeconds
   }
 
   # A live retry loop continues writing the heartbeat, so heartbeat age alone never catches it.
@@ -665,7 +737,7 @@ while ($true) {
       else { Write-Log ("farm silent {0:N0}s - could not start the farm script through the MCP (attempt {1})" -f $stale, $attempts) }
     }
     "matcha" {
-      Write-Log ("farm silent {0:N0}s - restarting Matcha to rerun auto-exec (attempt {1})" -f $stale, $attempts)
+      Write-Log ("farm stalled/recovering {0:N0}s - restarting Matcha to rerun auto-exec (attempt {1})" -f $stale, $attempts)
       Get-Process -Name $exeName -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $MatchaExe } | Stop-Process -Force
       Start-Sleep -Seconds 2
       Start-Matcha
