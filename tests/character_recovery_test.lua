@@ -22,6 +22,9 @@ local Qte={Active=false}
 local FarmStats={Target="target",Status="attacking"}
 local CurrentTitanTarget={}
 local LastProgress=0
+local function Progress() LastProgress=now end
+local rewardsVisible=false
+local function IsRetryVisible() return rewardsVisible end
 local TitanForm=false
 local Vector3Zero=Vector3.new(0,0,0)
 local Recovery={Blocked=true,CheckedAt=-math.huge,Braked=false,ReadState=function(h) return h and h.State end}
@@ -38,6 +41,9 @@ local c=body(2); LocalPlayer.Character=c
 local function tick(t) now=t; Recovery.Tick() end
 ]====]
   local checks=[====[
+UserConfigs.AutoRetry=true;rewardsVisible=true;LocalPlayer.Character=nil
+tick(-1);assert(not Recovery.Blocked and FarmStats.Status=="pressing retry" and #beats==0,"rewards without a character belongs to Retry, not recovery")
+rewardsVisible=false;LocalPlayer.Character=c;Recovery.Blocked=true
 tick(0); assert(Recovery.Blocked,"startup must validate before combat")
 tick(0.5); assert(not Recovery.Blocked,"healthy startup resumes")
 beats={}; CharacterCache[1].Hrp={old=true}; CharacterCache[1].Humanoid={old=true}
