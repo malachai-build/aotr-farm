@@ -55,8 +55,6 @@ Regression fixtures: `tests/character_recovery_test.lua` (both sources staged at
 
 ## Teleport restart timing
 
-Teleport recovery records the process it stops and waits briefly for that exact PID to exit before starting a replacement. A pending launch retries every 250 ms, outside the normal stall-recovery cooldown; a live replacement is reused. The log records join-marker age and actual process-launch latency.
-
-The Roblox log follower checks game-session markers and content timestamps rather than relying on directory modification times. Idle/tray logs cannot displace a game log. Offsets and unfinished lines are tracked per file; new game logs retain their first join events.
+Teleport recovery closes all processes matching the configured Matcha executable when teleport begins. While waiting for the next server, it repeats that cleanup every 100 ms to close copies that respawn. It cleans up once more when the join marker arrives, then launches Matcha directly. The original log follower and join timeout remain in use; there is no duplicate-process launch guard or watchdog mutex. Run one watchdog at a time.
 
 Regression check: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\watchdog_teleport_test.ps1`.
