@@ -458,10 +458,9 @@ if ($FarmReadPath -and -not (Test-Path -LiteralPath (Join-Path $WorkspaceRoot $F
 $StartFarmLua = $null
 if ($farmSources.Count -gt 0) {
   $normal = if ($farmSources -contains 'aotr/autofarm.lua') { 'aotr/autofarm.lua' } else { $farmSources[0] }
-  $raid = if ($farmSources -contains 'aotr/autofarm_branch.lua') { 'aotr/autofarm_branch.lua' } else { $normal }
   $normalLua = ConvertTo-Json -InputObject $normal -Compress
-  $raidLua = ConvertTo-Json -InputObject $raid -Compress
-  $StartFarmLua = '_G.AotrStop = nil; local p = game.PlaceId == 14638336319 and ' + $normalLua + ' or ' + $raidLua + '; local f,e = loadstring(readfile(p), p); if f then task.spawn(f); print("farm spawned by watchdog: " .. p) else warn(e) end'
+  # -FarmReadPath selects a feature set; maps do not select which script is restarted.
+  $StartFarmLua = '_G.AotrStop = nil; local p = ' + $normalLua + '; local f,e = loadstring(readfile(p), p); if f then task.spawn(f); print("farm spawned by watchdog: " .. p) else warn(e) end'
 }
 if ($ValidateOnly) {
   [pscustomobject]@{

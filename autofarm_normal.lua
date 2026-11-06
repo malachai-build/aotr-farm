@@ -1644,6 +1644,7 @@ local Qte = {
   LastScale = nil, LastMove = 0,
   Trace = {},
   Count = 0,
+  Grab = { Active = false, ScannedAt = -math.huge, SeenAt = -math.huge },
 }
 
 -- Called from a farm thread (GetPath yields).
@@ -1659,6 +1660,50 @@ local function FindQteUi()
   Qte.Key = Qte.Frame and GetPath(Qte.Frame, false, "Main", "Key")
 end
 
+-- Ordinary titan grabs use Interface.Buttons, independently of the raid QTE.
+-- Scan the current children: prompts can be destroyed/recreated and keys can repeat.
+function Qte.GrabTick(now)
+  local grab = Qte.Grab
+  if now - grab.ScannedAt < 0.05 then return grab.Active end
+  grab.ScannedAt = now
+  local buttons = Interface and Interface:FindFirstChild("Buttons")
+  local prompt, label, count = nil, nil, 0
+  if buttons and buttons.Parent and IsObjectVisible(buttons) then
+    for _, button in ipairs(buttons:GetChildren()) do
+      local main = button:FindFirstChild("Main")
+      local key = main and main:FindFirstChild("Key")
+      if key and IsObjectVisible(button) and IsObjectVisible(main) and IsObjectVisible(key) then
+        prompt, label, count = button, key, count + 1
+      end
+    end
+  end
+  if count == 0 then
+    grab.Id, grab.Text, grab.PressedAt = nil, nil, nil
+    -- Keep combat paused across the brief gap between successive prompts.
+    grab.Active = now - grab.SeenAt < 0.3
+    return grab.Active
+  end
+  grab.Active, grab.SeenAt = true, now
+  -- Multiple visible prompts have no known ordering; never invent a sequence.
+  if count ~= 1 then return true end
+  local text = label.Text
+  if grab.Id ~= prompt.Address or grab.Text ~= text then
+    grab.Id, grab.Text, grab.PressedAt = prompt.Address, text, nil
+  end
+  if not isrbxactive() or Qte.ReleaseAt then return true end
+  local vk = KeyToVk(text)
+  -- Retry an unchanged prompt slowly if the game did not accept the first press.
+  -- There is no sequence length or total press limit.
+  if vk and (not grab.PressedAt or now - grab.PressedAt >= 0.35) then
+    grab.PressedAt = now
+    Qte.Vk = vk
+    pcall(keypress, vk)
+    Qte.ReleaseAt = now + 0.05
+    Boot("grab escape key: " .. tostring(text))
+  end
+  return true
+end
+
 local function QteTick()
   local now = os.clock()
   if Qte.ReleaseAt and now >= Qte.ReleaseAt then pcall(keyrelease, Qte.Vk); Qte.ReleaseAt = nil end
@@ -1666,6 +1711,13 @@ local function QteTick()
   if not UserConfigs.AutoQTE then
     if Qte.ReleaseAt and Qte.Vk then pcall(keyrelease, Qte.Vk) end
     Qte.ReleaseAt, Qte.Active, Qte.PressedAt = nil, false, nil
+    Qte.Grab.Active, Qte.Grab.SeenAt, Qte.Grab.ScannedAt = false, -math.huge, -math.huge
+    Qte.Grab.Id, Qte.Grab.Text, Qte.Grab.PressedAt = nil, nil, nil
+    return
+  end
+  if Qte.GrabTick(now) then
+    Qte.Active = true
+    Qte.LastScale, Qte.PromptKey, Qte.PressedAt = nil, nil, nil
     return
   end
   if not Qte.Frame or not Qte.Frame.Parent then Qte.Active = false; return end
@@ -2282,6 +2334,16 @@ function UI.IsOpen()
   return not UI.unloading and UI.window and UI.window.Visible == true
     and UI.lib and UI.lib.Toggled ~= false and not UI.lib._unloaded
 end
+function UI.MousePosition()
+  -- GetMouse is unavailable in some client sessions.
+  -- Keep cursor failures from aborting status/heartbeat updates or the combat loop.
+  local ok, x, y = pcall(function()
+    local mouse = LocalPlayer:GetMouse()
+    return mouse.X, mouse.Y
+  end)
+  if ok and type(x) == "number" and type(y) == "number" then return Vector2.new(x, y) end
+  return nil
+end
 function UI.IsInteracting()
   if not UI.IsOpen() then return false end
   local win = UI.window
@@ -2289,7 +2351,8 @@ function UI.IsInteracting()
     or win.ColorDrag or win.OpenDropdown or win.OpenColorPicker then return true end
   local position, size = win.Position, win.Size
   if not position or not size then return false end
-  local mouse = LocalPlayer:GetMouse()
+  local mouse = UI.MousePosition()
+  if not mouse then return true end -- Protect menu controls until input is readable again.
   return mouse.X >= position.X and mouse.X <= position.X + size.X
     and mouse.Y >= position.Y and mouse.Y <= position.Y + size.Y
 end
@@ -2299,7 +2362,8 @@ function UI.RemoveCursor()
 end
 function UI.UpdateCursor()
   if Stopped() or UI.unloading then UI.RemoveCursor(); return end
-  local visible = UI.IsOpen() and isrbxactive() == true
+  local mouse = UI.IsOpen() and isrbxactive() == true and UI.MousePosition()
+  local visible = mouse ~= nil and mouse ~= false
   if not visible then
     if UI.cursorFill then UI.cursorFill.Visible = false; UI.cursorEdge.Visible = false end
     return
@@ -2315,7 +2379,6 @@ function UI.UpdateCursor()
     UI.cursorEdge.Color = Color3.fromRGB(10, 10, 10)
     UI.cursorEdge.ZIndex = 10001
   end
-  local mouse = LocalPlayer:GetMouse()
   local a = Vector2.new(mouse.X, mouse.Y)
   local b = Vector2.new(mouse.X + 5, mouse.Y + 18)
   local c = Vector2.new(mouse.X + 14, mouse.Y + 12)
@@ -2432,7 +2495,7 @@ local function buildMenu()
     Tooltip = "Reload blades at the safe spot; refill at the gas tank on maps the script knows",
     Callback = setter("AutoReload") }))
   reg("AutoQTE", farm:AddToggle("AutoQTE", { Text = "Auto QTE / Grab Escape", Default = UserConfigs.AutoQTE,
-    Tooltip = "Solve visible QTE and grab-escape prompts using their displayed key", Callback = setter("AutoQTE") }))
+    Tooltip = "Read each visible QTE or grab-escape key; follow the entire sequence automatically", Callback = setter("AutoQTE") }))
   reg("NoKillMinutes", farm:AddSlider("NoKillMinutes", { Text = "Reset After No Kill", Default = UserConfigs.NoKillMinutes,
     Min = 2, Max = 30, Rounding = 0, Suffix = " min", Tooltip = "Feed a titan to restart a stuck run",
     Callback = setter("NoKillMinutes") }))

@@ -53,8 +53,8 @@ end
 
 run("aotr/lobby_test/normal_loader.lua", 14638336319, true, false, true)
 run("aotr/lobby_test/raid_loader.lua", 17688739434, true, false, true)
-run("aotr/lobby_test/raid_loader.lua", 14638336319, true, false, false)
-run("aotr/lobby_test/normal_loader.lua", 17688739434, true, false, false)
+run("aotr/lobby_test/raid_loader.lua", 14638336319, true, false, true)
+run("aotr/lobby_test/normal_loader.lua", 17688739434, true, false, true)
 for _, exists in ipairs({ false, true }) do
   run("aotr/lobby_test/normal_farm.lua", 14638336319, exists, false, false, true)
   run("aotr/lobby_test/raid_farm.lua", 17688739434, exists, false, false, true)

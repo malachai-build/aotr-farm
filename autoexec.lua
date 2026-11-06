@@ -6,10 +6,11 @@ if game.PlaceId == 13379208636 or game.PlaceId == 14916516914 or game.PlaceId ==
   writefile("aotr/heartbeat.txt", "unloaded " .. os.date("%H:%M:%S"))
   return
 end
-if game.PlaceId ~= 14638336319 then return end
+if game.GameId ~= 0 and game.GameId ~= 4658598196 then return end
+-- Users choose the stable normal farm or the feature-rich Waves/Raid farm.
+-- A map ID must not choose the script for them.
 if not isfolder("aotr") then makefolder("aotr") end
-
-local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/5ae5944a93e775709a2eae1150ce5f0ad19861d2/autofarm_normal.lua")
+local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/07017057d0d3ea63f6e8ef3b4c0d3c2adfc6cfa4/autofarm_normal.lua")
 if type(source) ~= "string" or #source < 100000 then
   warn("[AoTR Normal] source download failed")
   return
