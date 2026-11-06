@@ -2334,6 +2334,16 @@ function UI.IsOpen()
   return not UI.unloading and UI.window and UI.window.Visible == true
     and UI.lib and UI.lib.Toggled ~= false and not UI.lib._unloaded
 end
+function UI.MousePosition()
+  -- GetMouse is unavailable in some client sessions.
+  -- Keep cursor failures from aborting status/heartbeat updates or the combat loop.
+  local ok, x, y = pcall(function()
+    local mouse = LocalPlayer:GetMouse()
+    return mouse.X, mouse.Y
+  end)
+  if ok and type(x) == "number" and type(y) == "number" then return Vector2.new(x, y) end
+  return nil
+end
 function UI.IsInteracting()
   if not UI.IsOpen() then return false end
   local win = UI.window
@@ -2341,7 +2351,8 @@ function UI.IsInteracting()
     or win.ColorDrag or win.OpenDropdown or win.OpenColorPicker then return true end
   local position, size = win.Position, win.Size
   if not position or not size then return false end
-  local mouse = LocalPlayer:GetMouse()
+  local mouse = UI.MousePosition()
+  if not mouse then return true end -- Protect menu controls until input is readable again.
   return mouse.X >= position.X and mouse.X <= position.X + size.X
     and mouse.Y >= position.Y and mouse.Y <= position.Y + size.Y
 end
@@ -2351,7 +2362,8 @@ function UI.RemoveCursor()
 end
 function UI.UpdateCursor()
   if Stopped() or UI.unloading then UI.RemoveCursor(); return end
-  local visible = UI.IsOpen() and isrbxactive() == true
+  local mouse = UI.IsOpen() and isrbxactive() == true and UI.MousePosition()
+  local visible = mouse ~= nil and mouse ~= false
   if not visible then
     if UI.cursorFill then UI.cursorFill.Visible = false; UI.cursorEdge.Visible = false end
     return
@@ -2367,7 +2379,6 @@ function UI.UpdateCursor()
     UI.cursorEdge.Color = Color3.fromRGB(10, 10, 10)
     UI.cursorEdge.ZIndex = 10001
   end
-  local mouse = LocalPlayer:GetMouse()
   local a = Vector2.new(mouse.X, mouse.Y)
   local b = Vector2.new(mouse.X + 5, mouse.Y + 18)
   local c = Vector2.new(mouse.X + 14, mouse.Y + 12)

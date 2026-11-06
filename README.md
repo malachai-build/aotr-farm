@@ -10,9 +10,9 @@ Save this single line as `C:\matcha\autoexec\aotr_normal.lua`:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/refs/heads/main/autoexec.lua"))()
 ```
 
-The entrypoint checks the normal mission place, creates the Matcha `aotr` workspace folder, downloads the pinned source, and spawns it immediately. It has no top-level wait; Matcha needs the source spawned before the autoexec caller yields.
+The entrypoint supports every AoTR mission map, checks the game ID, skips the main menu, lobby and trade hub, creates the Matcha `aotr` workspace folder, downloads the pinned source, and spawns it immediately. It has no top-level wait; Matcha needs the source spawned before the autoexec caller yields. New mission maps need no loader update.
 
-Keep only one active AoTR autoexec entrypoint for this place. Move older autoexec copies to the local deprecated archive before installing this line.
+Keep only one active AoTR autoexec entrypoint. Choose this farm for the simpler, more stable titan-killing feature set, or Waves/Raid for its additional features. Do not enable both loadstrings together. Move older autoexec copies to the local deprecated archive before installing this line.
 
 The farm creates `aotr` through Matcha's file API before writing logs or heartbeat files, including when started directly in a mission. No workspace folders need to be created manually.
 
