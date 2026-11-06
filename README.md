@@ -43,13 +43,15 @@ Workspace regression check: `powershell.exe -NoProfile -ExecutionPolicy Bypass -
 
 Based on Kitty's AoTR script v1.0.7 (@roguekitty).
 
-## HUD reload test branch
+## HUD reloads, human skills, and menu placement
 
-The test branch disables automatic titan transformation. The normal farm retains its former shifting implementation and controls in comments; both farms use the same human-skill logic after nape pulling and before the next slash. Both expose Main / Human Skills controls. Human skill use is blocked during reload/refill, QTE, recovery, menu interaction, or loss of focus.
+Blade reloads use the HUD fill gradient rather than blade transparency. Gradient X from -0.15 through 0 requests a reload; combat waits for full durability before resuming. The no-target safety hover is preserved. Empty spare sets (`0/3`), empty gas, or persistently unreadable HUD data request a bounded refill. Failed attempts resume farming and retry after 20 seconds. Counter readers accept unnamed labels and rich text, and startup/reload settling prevents transition frames from requesting a refill.
 
-The local `codex/hud-blade-reload` branch replaces blade transparency checks with the blade HUD fill gradient. It reloads at gradient X from -0.15 through 0, waits for the HUD to return to full, and pauses combat for the action. The no-target safety hover is preserved. Empty spare sets (`0/3`), empty gas, or unreadable HUD data request a bounded refill attempt. Failed attempts resume farming and retry after 20 seconds.
+The gradient layout is verified for Roblox `version-f0ea5da9412f4e35`; other versions use the unreadable-HUD fallback until verified. `tests/hud_reload_test.lua` covers both sources staged at `aotr/reload_tests/normal.lua` and `raid.lua`.
 
-The gradient memory layout is verified for Roblox `version-f0ea5da9412f4e35`; other versions use the unreadable-HUD fallback until verified. The Lua fixture in `tests/hud_reload_test.lua` covers both repositories with mocked input and movement. Stage sources at `aotr/reload_tests/normal.lua` and `raid.lua` before running it. HUD counters also support unnamed text labels and rich text. A two-second startup/unknown-data observation period and a one-second reload settling period prevent transition frames from starting a refill. Refill logs record the triggering reason, gas, spare sets, and gradient. Full live reload/refill cycles remain to be tested before release; public autoexec source pins are unchanged.
+Both farms use human skills after nape pulling and before slashing. Main / Human Skills includes **Use Awakening**, off by default, and the awakening slot selector. When disabled, the selected slot is skipped while other human skills remain enabled; turning it off also cancels pending awakening retries. The toggle is saved and applies to Colossal's immediate skill routine too. Automated titan transformation is disabled; the normal farm retains the former implementation and controls in comments.
+
+Menu placement waits for a valid camera viewport before centering and preserves subsequent dragging. Recovery completion clears its status label; the normal human-skill health helper is declared before its callers so combat can continue after recovery. Regression fixtures include `tests/human_skills_test.lua`, `tests/menu_centering_test.lua`, `tests/character_recovery_test.lua`, and `tests/grab_escape_test.lua`.
 
 ## Grab and ragdoll recovery
 

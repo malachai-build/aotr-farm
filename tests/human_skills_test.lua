@@ -15,10 +15,12 @@ local task={wait=function(dt) now += dt end}
 local function keypress(k) presses[#presses+1]=k end
 local function keyrelease(k) releases[#releases+1]=k end
 local function Stopped() return stopped end
-local function IsLocalAlive() return alive end
+local function GetPlayerCharacter(p) return alive and p.Character or nil end
+local function GetPlayerHumanoid() return {Parent=true,Health=alive and 100 or 0} end
+local function GetPlayerHrp() return {Parent=true} end
 local function isrbxactive() return focused end
 local function Boot() end
-local UserConfigs={HumanSkills=true,Autofarm=true,AwakeningSlot=1}
+local UserConfigs={HumanSkills=true,Autofarm=true,AwakeningEnabled=true,AwakeningSlot=1}
 local Recovery={Blocked=false}
 local Qte={Active=false}
 local Supplies={Active=nil}
@@ -45,7 +47,7 @@ end
   local checks=[====[
 local function reset()
   now=100;bar=50;alive=true;focused=true;stopped=false;interacting=false;shifter=nil
-  UserConfigs.HumanSkills=true;UserConfigs.Autofarm=true
+  UserConfigs.HumanSkills=true;UserConfigs.Autofarm=true;UserConfigs.AwakeningEnabled=true
   Recovery.Blocked=false;Qte.Active=false;Supplies.Active=nil;WhatShouldIBeDoing="attack"
   presses={};releases={}
   for i=1,5 do labels[i].Text="busy" end
@@ -82,11 +84,21 @@ for _,gate in ipairs({"disabled","farm_off","dead","unfocused","stopped","menu",
   elseif gate=="shifter" then shifter=true end
   assert(not Stats.UseHumanSkill() and #presses==0,"human input suppressed during "..gate)
 end
+reset();bar=100;UserConfigs.AwakeningEnabled=false;labels[1].Text="0s";labels[2].Text="0s"
+Stats.UseHumanSkill()
+assert(#presses==1 and presses[1]==0x32,"disabled awakening skips selected slot and still uses ordinary skills")
+reset();bar=100;labels[1].Text="0s";Stats.UseHumanSkill();assert(presses[1]==0x31)
+UserConfigs.AwakeningEnabled=false;labels[2].Text="0s";now += 0.21;Stats.UseHumanSkill()
+assert(presses[#presses]==0x32 and Stats.HumanSkills.Pending==2,"turning awakening off cancels its pending retries")
 reset();local burstCalls=0;Stats.Colossal={UseReadySkills=function() burstCalls += 1; return true end}
 assert(Stats.UseHumanSkill(true) and burstCalls==1,"preserve Colossal fast-skill delegation")
 Stats.Colossal=nil;assert(not Stats.UseHumanSkill(true),"normal farm has no raid-only dependency")
 ]====]
-  assert(loadstring(header..human..checks,"human_skills_"..variant))()
+  local aliveAt=assert(string.find(source,"local function IsLocalAlive(): boolean",1,true))
+  local aliveEnd=assert(string.find(source,"-- End local alive check.",aliveAt,true))
+  assert(aliveAt<a,"live IsLocalAlive declaration must precede human skills in the real script")
+  local aliveSource=string.sub(source,aliveAt,aliveEnd-1)
+  assert(loadstring(header..aliveSource..human..checks,"human_skills_"..variant))()
   local active=string.gsub(source,"%-%-%[====%[.-%]====%]","")
   active=string.gsub(active,"%-%-[^\n]*","")
   assert(not string.find(active,"TryShift(",1,true) and not string.find(active,"IsTitanForm(",1,true)

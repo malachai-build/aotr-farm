@@ -53,6 +53,7 @@ assert(#beats==1,"do not refresh recovery timer")
 c.Ragdoll=false; c.hum.State=8; tick(1.4); assert(Recovery.Blocked,"debounce recovery")
 tick(1.9); assert(not Recovery.Blocked and beats[2]=="farming","resume after game clears ragdoll")
 assert(#presses==1 and presses[1]==0x20,"one normal jump after recovery")
+assert(FarmStats.Status=="resuming combat","successful recovery clears its stale status label")
 tick(2.0); assert(#releases==1 and releases[1]==0x20,"release jump without waiting for next sample")
 -- Positive health must not hide a destroyed character, even after healing.
 c.parts.Head=nil; tick(2.3); assert(Recovery.Blocked and Recovery.Reason=="incomplete character body")
@@ -72,6 +73,9 @@ UserConfigs.Autofarm=false; c.Ragdoll=true; tick(6); assert(not Recovery.Blocked
 UserConfigs.Autofarm=true; c=body(5); c.Ragdoll=true; LocalPlayer.Character=c; tick(6.3)
 assert(not Recovery.Blocked,"sticky Ragdoll attribute does not block a healthy native state")
 c.hum.State=nil; tick(6.6); assert(not Recovery.Blocked,"unreadable state does not trust sticky attribute")
+Qte.Active=true;tick(7);assert(Recovery.Blocked and Recovery.Reason=="escape / quick time event")
+Qte.Active=false;tick(7.3);tick(7.8)
+assert(not Recovery.Blocked and FarmStats.Status=="resuming combat","completed escape returns to combat on the same character")
 ]====]
   assert(loadstring(header..extract(source,"function Recovery.Tick()","-- End character recovery monitor.")..checks,"recovery_"..variant))()
   print("PASS: "..variant.." damage, ragdoll, missing body, escape ownership, respawn, pause, recovery timer")

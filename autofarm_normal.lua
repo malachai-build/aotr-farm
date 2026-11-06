@@ -135,6 +135,7 @@ local UserConfigs = {
   NapeOffsetY = 2,        -- studs; pulled napes sit this far above the player
   SafeHeight = 9999,      -- Y of the reload spot
   HumanSkills = true,     -- use ready human skills between nape pulling and slashing
+  AwakeningEnabled = false, -- opt in to the selected human awakening skill
   AwakeningSlot = 1,      -- human awakening/Rage Mode hotbar slot
   --[====[ Disabled titan shifting settings.
   ShiftEnabled = false,   -- press the titan shifting skill when its Shift Bar can be full
@@ -157,7 +158,7 @@ local SAVED_KEYS = {
   "HeightNormal", "HeightStall", "HeightAttack", "HeightColossal", "HoverOffsetX", "HoverOffsetZ",
   "NapeOffsetY", "SafeHeight", "DebugMode",
   -- "ShiftEnabled", "ShiftKey", "TitanSkills", "TitanSkillDelay", "TitanStrikeDistance", "TitanRetreatHp", "TitanReturnHp", "TitanKillTimeout", -- Titan shifting disabled.
-  "HumanSkills", "AwakeningSlot",
+  "HumanSkills", "AwakeningEnabled", "AwakeningSlot",
   "NoKillMinutes", "BossNoKillMinutes", "AutoQTE",
 }
 
@@ -622,6 +623,15 @@ local function GetPlayerHumanoid(player: Player): Humanoid?
   return Humanoid
 end
 
+
+local function IsLocalAlive(): boolean
+  if Recovery.Blocked then return false end
+  local Humanoid = GetPlayerHumanoid(LocalPlayer); if not Humanoid then return false end
+  -- Health reads nil on a humanoid that is being torn down after a death; that crashed the farm.
+  local ok, health = pcall(function() return Humanoid.Health end)
+  return ok and type(health) == "number" and health > 0
+end
+-- End local alive check.
 
 local function GetTitanHrp(titan: Instance): BasePart?
   if not IsValid(titan) then return nil end
@@ -1676,6 +1686,10 @@ function Stats.UseHumanSkill(burst: boolean?): boolean
     end
   end
   local awakening = math.clamp(math.floor(UserConfigs.AwakeningSlot), 1, 5)
+  if not UserConfigs.AwakeningEnabled and state.Pending == awakening then
+    state.Pending = nil
+    state.NextSlot = awakening % 5 + 1
+  end
   local function slotUi(slot)
     local skill = state.Slots[slot]
     if not skill or not skill.Parent then
@@ -1722,7 +1736,7 @@ function Stats.UseHumanSkill(burst: boolean?): boolean
   if now - state.LastSuccess < (burst and 0.15 or 2.5) then return false end
   for offset = 0, 4 do
     local slot = (state.NextSlot + offset - 1) % 5 + 1
-    local canAwaken = slot ~= awakening or (burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)
+    local canAwaken = slot ~= awakening or (UserConfigs.AwakeningEnabled and ((burst and (not bar or not max)) or (bar and max and max > 0 and bar >= max - 0.5 and not state.AwakeningActive)))
     if canAwaken and now >= (state.RetryAfter[slot] or 0) then
       local seconds, vk, text, stable = slotUi(slot)
       if seconds and (seconds <= 1 or stable) and vk then
@@ -1832,6 +1846,7 @@ local function QteTick()
     return
   end
   if Qte.GrabTick(now) then
+    if not Qte.Active then Qte.Since, Qte.Trace = now, {} end
     Qte.Active = true
     Qte.LastScale, Qte.PromptKey, Qte.PressedAt = nil, nil, nil
     return
@@ -1967,6 +1982,9 @@ function Recovery.Tick()
       pcall(keypress, 0x20); Recovery.ReleaseAt = now + 0.05
     end
     Recovery.Blocked, Recovery.Since, Recovery.Reason = false, nil, nil
+    if type(FarmStats.Status) == "string" and string.match(FarmStats.Status, "^recovering:") then
+      FarmStats.Status = "resuming combat"
+    end
     LastProgress = now
     Heartbeat("farming")
   end
@@ -2039,13 +2057,7 @@ local function LogDeath(where: string)
 end
 
 
-local function IsLocalAlive(): boolean
-  if Recovery.Blocked then return false end
-  local Humanoid = GetPlayerHumanoid(LocalPlayer); if not Humanoid then return false end
-  -- Health reads nil on a humanoid that is being torn down after a death; that crashed the farm.
-  local ok, health = pcall(function() return Humanoid.Health end)
-  return ok and type(health) == "number" and health > 0
-end
+
 
 
 -- Clicks only land while Roblox has focus; the hover retreats to the safe spot while it does not.
@@ -2139,6 +2151,7 @@ local function KillTitan(titan: Instance)
       Tr.step("main", "pull napes (write)")
       PullNapesTo(titan, UserConfigs.PullAllNapes and PullList or nil)
 
+      Tr.step("main", "human skills")
       Stats.UseHumanSkill()
 
       Tr.step("main", "slash wait")
@@ -2690,6 +2703,9 @@ local function buildMenu()
   local skills = main:AddLeftGroupbox("Human Skills")
   reg("HumanSkills", skills:AddToggle("HumanSkills", { Text = "Use Human Skills", Default = UserConfigs.HumanSkills,
     Tooltip = "Use ready human skills between slashes; wait 2.5 seconds between confirmed uses", Callback = setter("HumanSkills") }))
+  reg("AwakeningEnabled", skills:AddToggle("AwakeningEnabled", { Text = "Use Awakening", Default = UserConfigs.AwakeningEnabled,
+    Tooltip = "Allow the selected awakening slot; when disabled, that slot is skipped while other human skills remain enabled",
+    Callback = setter("AwakeningEnabled") }))
   reg("AwakeningSlot", skills:AddSlider("AwakeningSlot", { Text = "Awakening Slot", Default = UserConfigs.AwakeningSlot,
     Min = 1, Max = 5, Rounding = 0, Tooltip = "Hotbar slot for Rage Mode; press only at full bar, then wait until the bar empties and fills again",
     Callback = setter("AwakeningSlot") }))
