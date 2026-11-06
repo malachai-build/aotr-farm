@@ -109,7 +109,7 @@ focused=false; now=1.5; QteTick(); before=#presses; now=2; QteTick(); assert(#pr
 focused=true; Qte.Key.Text="unknown"; now=2.5; QteTick(); assert(#presses==before,"unknown key is ignored")
 ]====]
   local key=extract(source,"local function KeyToVk(","-- End prompt key mapping.")
-  local qte=extract(source,"local Qte = {","--#endregion -- Quick time events --")
-  assert(loadstring(qheader..key..qte..qchecks,"qte_"..variant))()
+  local qte=extract(source,"Qte = {","--#endregion -- Quick time events --")
+  assert(loadstring(qheader.."\nlocal Qte\n"..key..qte..qchecks,"qte_"..variant))()
   print("PASS: "..variant.." timed/button escape, repeated prompt, toggle cancellation, key release, focus")
 end
