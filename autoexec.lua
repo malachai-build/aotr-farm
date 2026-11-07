@@ -10,10 +10,17 @@ if game.GameId ~= 0 and game.GameId ~= 4658598196 then return end
 -- Users choose the stable normal farm or the feature-rich Waves/Raid farm.
 -- A map ID must not choose the script for them.
 if not isfolder("aotr") then makefolder("aotr") end
-local source = game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/7ec0ec1eeafeb392d8802903c429d2bb5ca89304/autofarm_normal.lua")
-if type(source) ~= "string" or #source < 100000 then
-  warn("[AoTR Normal] source download failed")
+local ok, source = pcall(function()
+  return game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/0676b498cfe653771ed5f24ef2670e02131627f2/autofarm_normal.lua")
+end)
+if not ok or type(source) ~= "string" or #source < 100000 then
+  warn("[AoTR Normal] source download failed: " .. tostring(source))
   return
 end
 
-task.spawn(loadstring(source, "autofarm_normal.lua"))
+local chunk, compileError = loadstring(source, "autofarm_normal.lua")
+if type(chunk) ~= "function" then
+  warn("[AoTR Normal] source compile failed: " .. tostring(compileError))
+  return
+end
+task.spawn(chunk)
