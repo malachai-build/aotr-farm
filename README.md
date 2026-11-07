@@ -43,6 +43,12 @@ Workspace regression check: `powershell.exe -NoProfile -ExecutionPolicy Bypass -
 
 Based on Kitty's AoTR script v1.0.7 (@roguekitty).
 
+## Bundled offsets
+
+The normal farm includes the verified offsets for Roblox `version-f0ea5da9412f4e35`. It makes no offsets downloads and does not read the old offsets cache. Startup therefore needs no access to the external offsets website. An unknown or unreadable client version stops startup with a visible warning; new Roblox versions require a verified layout and a farm release.
+
+Regression check: `python tests/run_startup_offsets_test.py --luau <path-to-luau.exe>`.
+
 ## HUD reloads, human skills, and menu placement
 
 Blade reloads use the HUD fill gradient rather than blade transparency. Gradient X from -0.15 through 0 requests a reload; combat waits for full durability before resuming. The no-target safety hover is preserved. Empty spare sets (`0/3`), empty gas, or persistently unreadable HUD data request a bounded refill. Failed attempts resume farming and retry after 20 seconds. Counter readers accept unnamed labels and rich text, and startup/reload settling prevents transition frames from requesting a refill.

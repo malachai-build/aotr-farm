@@ -461,50 +461,30 @@ local function HandleDifferentGasTankPaths(): Instance?
   return nil
 end; HandleDifferentGasTankPaths()
 
-DebugPrint("debug", nil, nil, "GetOffsets", "Proceeding to fetch offsets from the server...")
-
--- Last good download, used when the offsets site is down. Offsets change with Roblox updates,
--- so a cached copy can go stale; a fresh download always overwrites it.
-local OFFSETS_CACHE = "aotr/offsets.json"
-
-local function DecodeOffsets(raw: string?): OffsetsData?
-  if type(raw) ~= "string" or raw == "" then return nil end
-  local success, decoded = pcall(function() return HttpService:JSONDecode(raw) end)
-  if not success or type(decoded) ~= "table" or type(decoded.Offsets) ~= "table" then
-    DebugPrint("warn", nil, nil, "GetOffsets", "JSON decode failed: ", decoded)
+-- Offsets ship with the farm: startup never depends on a user's access to an offsets site.
+-- Add a separately verified layout for each new Roblox client version before releasing it.
+local function GetOffsets(): OffsetsData?
+  local versionOk, version = pcall(getrbxversion)
+  if not versionOk or type(version) ~= "string" or version == "" then
+    Boot("exit: unable to identify Roblox version for bundled offsets")
+    warn("[AoTR Normal] Startup stopped: cannot read Roblox client version. See aotr/boot.txt.")
     return nil
   end
-  return decoded :: OffsetsData
-end
-
-local function GetOffsets(): OffsetsData?
-  local ok, res = pcall(function()
-    return httpget("https://offsets.imtheo.lol/Offsets/Offsets.json")
-  end)
-
-  local decoded = ok and DecodeOffsets(res) or nil
-  if decoded then
-    pcall(writefile, OFFSETS_CACHE, res)
-    return decoded
+  if version == "version-f0ea5da9412f4e35" then
+    Boot("using bundled offsets for " .. version)
+    return { Offsets = {
+      Model = { PrimaryPart = 576 }, BasePart = { Primitive = 376 },
+      Primitive = { Position = 212 }, GuiObject = { Visible = 1397, Size = 1272 },
+      GuiBase2D = { AbsoluteSize = 0 },
+      Humanoid = { HumanoidState = 2216, HumanoidStateID = 32 },
+    } }
   end
-
-  DebugPrint("warn", nil, nil, "GetOffsets", "Failed to fetch offsets: ", tostring(res))
-
-  local cacheOk, cached = pcall(function()
-    if type(isfile) == "function" and not isfile(OFFSETS_CACHE) then return nil end
-    return readfile(OFFSETS_CACHE)
-  end)
-  decoded = cacheOk and DecodeOffsets(cached) or nil
-  if decoded then Boot("offsets download failed, using cached " .. OFFSETS_CACHE) end
-  return decoded
+  Boot("exit: unsupported Roblox version " .. version .. "; bundled offsets update required")
+  warn("[AoTR Normal] Startup stopped: unsupported Roblox version " .. version .. ". Update the farm for matching bundled offsets.")
+  return nil
 end; local OffsetsFake = GetOffsets()
 
-
-if not OffsetsFake or next(OffsetsFake) == nil then
-  Boot("exit: offsets download failed and no cached " .. OFFSETS_CACHE)
-  DebugPrint("warn", nil, nil, "Offset check", "Offsets or next offset is missing..?")
-  return
-end
+if not OffsetsFake then return end
 
 
 local function IsValid(object: Instance?): boolean
