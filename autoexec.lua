@@ -11,7 +11,7 @@ if game.GameId ~= 0 and game.GameId ~= 4658598196 then return end
 -- A map ID must not choose the script for them.
 if not isfolder("aotr") then makefolder("aotr") end
 local ok, source = pcall(function()
-  return game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/0676b498cfe653771ed5f24ef2670e02131627f2/autofarm_normal.lua")
+  return game:HttpGet("https://raw.githubusercontent.com/malachai-build/aotr-farm/0bd5e148551969269cf2d58b9e3986653303fd1f/autofarm_normal.lua")
 end)
 if not ok or type(source) ~= "string" or #source < 100000 then
   warn("[AoTR Normal] source download failed: " .. tostring(source))
