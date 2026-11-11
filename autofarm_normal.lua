@@ -470,6 +470,16 @@ local function GetOffsets(): OffsetsData?
     warn("[AoTR Normal] Startup stopped: cannot read Roblox client version. See aotr/boot.txt.")
     return nil
   end
+  -- Live build layout: https://rbxoffsets.com/api/v1/windows/offsets/version-4ea8e85481e34f46/json
+  if version == "version-4ea8e85481e34f46" then
+    Boot("using bundled offsets for " .. version)
+    return { Offsets = {
+      Model = { PrimaryPart = 576 }, BasePart = { Primitive = 376 },
+      Primitive = { Position = 212 }, GuiObject = { Visible = 1837, Size = 712 },
+      GuiBase2D = { AbsoluteSize = 252 },
+      Humanoid = { HumanoidState = 2224, HumanoidStateID = 32 },
+    } }
+  end
   -- Archived build layout: https://rbxoffsets.com/api/v1/windows/offsets/version-11f155f3450f4c8e/json
   if version == "version-11f155f3450f4c8e" then
     Boot("using bundled offsets for " .. version)
@@ -1159,6 +1169,7 @@ function Supplies.ReadHud(force)
       local versionOk, version = pcall(getrbxversion)
       Supplies.GradientOffset = versionOk and version == "version-f0ea5da9412f4e35" and 296 or nil
       if versionOk and version == "version-11f155f3450f4c8e" then Supplies.GradientOffset = 304 end
+      if versionOk and version == "version-4ea8e85481e34f46" then Supplies.GradientOffset = 296 end
       Supplies.VersionChecked = true
     end
     if gradient and gradient.ClassName == "UIGradient" and Supplies.GradientOffset then
